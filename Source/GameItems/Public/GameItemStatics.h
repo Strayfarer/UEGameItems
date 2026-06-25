@@ -3,18 +3,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameItemContainerComponent.h"
 #include "GameItemTypes.h"
 #include "GameplayTagContainer.h"
 #include "WorldConditionQuery.h"
 #include "DropTable/GameItemDropTableRow.h"
-#include "GameFramework/Actor.h"
-#include "GameFramework/PlayerState.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "GameItemStatics.generated.h"
 
+class AActor;
 class UGameItem;
 class UGameItemContainer;
+class UGameItemContainerComponent;
 class UGameItemDef;
 class UGameItemFragment;
 class UGameItemSubsystem;
@@ -38,25 +37,42 @@ public:
 	static TArray<UGameItemContainer*> GetAllItemContainersForActor(AActor* Actor);
 
 	/** Return a game item container from an actor. */
-	UFUNCTION(BlueprintCallable, Category = "GameItems")
+	UFUNCTION(BlueprintCallable, Category = "GameItems", meta = (GameplayTagFilter="GameItemContainerIdTagsCategory"))
 	static UGameItemContainer* GetItemContainerForActor(AActor* Actor, FGameplayTag ContainerId);
 
 	/** Find and return an item fragment by class. */
-	UFUNCTION(BlueprintCallable, Meta = (WorldContext = "WorldContextObject", DeterminesOutputType = "FragmentClass"), Category = "GameItems")
-	static const UGameItemFragment* FindGameItemFragment(const UObject* WorldContextObject, TSubclassOf<UGameItemDef> ItemDef,
-	                                                     TSubclassOf<UGameItemFragment> FragmentClass);
+	UFUNCTION(BlueprintCallable, Category = "GameItems", Meta = (DeterminesOutputType = "FragmentClass"))
+	static const UGameItemFragment* FindFragment(TSubclassOf<UGameItemDef> ItemDef, TSubclassOf<UGameItemFragment> FragmentClass);
+
+	template <class T>
+	static const T* FindFragment(TSubclassOf<UGameItemDef> ItemDef)
+	{
+		static_assert(TIsDerivedFrom<T, UGameItemFragment>::IsDerived, TEXT("T must derive from UGameItemFragment"));
+		return Cast<T>(FindFragment(ItemDef, T::StaticClass()));
+	}
+
+	/** Find and return an item fragment by class from a game item. */
+	UFUNCTION(BlueprintCallable, Category = "GameItems", Meta = (DeterminesOutputType = "FragmentClass"), DisplayName = "Find Fragment (Item)")
+	static const UGameItemFragment* FindFragmentFromItem(UGameItem* Item, TSubclassOf<UGameItemFragment> FragmentClass);
+
+	template <class T>
+	static const T* FindFragmentFromItem(UGameItem* Item)
+	{
+		static_assert(TIsDerivedFrom<T, UGameItemFragment>::IsDerived, TEXT("T must derive from UGameItemFragment"));
+		return Cast<T>(FindFragmentFromItem(Item, T::StaticClass()));
+	}
 
 	/** Return an item container by id from an array of containers. */
-	UFUNCTION(BlueprintCallable, Category = "GameItems")
+	UFUNCTION(BlueprintCallable, Category = "GameItems", meta = (GameplayTagFilter="GameItemContainerIdTagsCategory"))
 	static UGameItemContainer* GetItemContainerById(const TArray<UGameItemContainer*>& Containers, FGameplayTag ContainerId);
 
-	UFUNCTION(BlueprintCallable)
+	UFUNCTION(BlueprintCallable, Category = "GameItems|Conditions")
 	static bool IsEquipmentConditionMet(UGameItem* Item);
 
-	UFUNCTION(BlueprintCallable)
+	UFUNCTION(BlueprintCallable, Category = "GameItems|Drops")
 	static bool IsDropConditionMet(TSubclassOf<UGameItemDef> ItemDef, AActor* TargetActor);
 
-	UFUNCTION(BlueprintCallable, Category = "GameItems")
+	UFUNCTION(BlueprintCallable, Category = "GameItems|Drops")
 	static void SelectItemsFromDropTableRow(const FGameItemDropContext& Context, const FGameItemDropTableRow& DropTableRow,
 	                                        TArray<FGameItemDefStack>& OutItems);
 
@@ -64,5 +80,9 @@ public:
 	UFUNCTION(BlueprintPure, Category="GameItems|Utilities")
 	static int32 GetWeightedRandomArrayIndex(const TArray<float>& Probabilities);
 
-	static bool EvaluateWorldCondition(const UObject* Owner, const FWorldConditionQueryDefinition& Condition, const FWorldConditionContextData& ContextData);
+	static bool EvaluateWorldCondition(const UObject* Owner, const FWorldConditionQueryDefinition& Condition,
+	                                   const FWorldConditionContextData& ContextData);
+
+	/** Return a string to use as a logging prefix which distinguishes between Server/Client (or empty if standalone). */
+	static FString GetNetDebugPrefix(const UObject* WorldContextObject);
 };

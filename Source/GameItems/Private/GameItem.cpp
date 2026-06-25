@@ -3,17 +3,34 @@
 
 #include "GameItem.h"
 
+#include "GameItemContainer.h"
 #include "GameItemDef.h"
 #include "Net/UnrealNetwork.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(GameItem)
 
-class FLifetimeProperty;
 
 UGameItem::UGameItem(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer),
-	  Count(0)
+	: Super(ObjectInitializer)
+	, Count(0)
 {
+}
+
+void UGameItem::OnRep_Count(int32 OldCount)
+{
+	OnCountChangedEvent.Broadcast(this, Count, OldCount);
+}
+
+void UGameItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	FDoRepLifetimeParams Params;
+	Params.bIsPushBased = true;
+
+	DOREPLIFETIME_WITH_PARAMS_FAST(ThisClass, ItemDef, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(ThisClass, Count, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(ThisClass, TagStats, Params);
 }
 
 const UGameItemDef* UGameItem::GetItemDefCDO() const
@@ -23,7 +40,11 @@ const UGameItemDef* UGameItem::GetItemDefCDO() const
 
 void UGameItem::SetItemDef(TSubclassOf<UGameItemDef> NewItemDef)
 {
-	ItemDef = NewItemDef;
+	if (ItemDef != NewItemDef)
+	{
+		ItemDef = NewItemDef;
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, ItemDef, this);
+	}
 }
 
 const FGameplayTagContainer& UGameItem::GetOwnedTags() const
@@ -38,48 +59,49 @@ void UGameItem::SetCount(int32 NewCount)
 	{
 		const int32 OldCount = Count;
 		Count = NewCount;
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, Count, this);
 
-		OnCountChangedEvent.Broadcast(NewCount, OldCount);
+		OnCountChangedEvent.Broadcast(this, NewCount, OldCount);
 	}
 }
 
-void UGameItem::AddTagStat(FGameplayTag Tag, int32 DeltaValue)
+bool UGameItem::HasTagStat(FGameplayTag Tag) const
 {
-	if (DeltaValue <= 0)
+	return TagStats.ContainsTag(Tag);
+}
+
+void UGameItem::SetTagStat(FGameplayTag Tag, int32 NewCount)
+{
+	const int32 OldValue = TagStats.GetStackCount(Tag);
+	if (!TagStats.SetStackCount(Tag, NewCount))
 	{
 		return;
 	}
 
-	const int32 OldValue = TagStats.GetStackCount(Tag);
-	TagStats.AddStack(Tag, DeltaValue);
+	MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, TagStats, this);
 	const int32 NewValue = TagStats.GetStackCount(Tag);
 
-	if (OldValue != NewValue)
-	{
-		OnTagStatChangedEvent.Broadcast(Tag, NewValue, OldValue);
-	}
-}
-
-void UGameItem::RemoveTagStat(FGameplayTag Tag, int32 DeltaValue)
-{
-	if (DeltaValue <= 0)
-	{
-		return;
-	}
-
-	const int32 OldValue = TagStats.GetStackCount(Tag);
-	TagStats.RemoveStack(Tag, DeltaValue);
-	const int32 NewValue = TagStats.GetStackCount(Tag);
-
-	if (OldValue != NewValue)
-	{
-		OnTagStatChangedEvent.Broadcast(Tag, NewValue, OldValue);
-	}
+	OnTagStatChangedEvent.Broadcast(this, Tag, NewValue, OldValue);
 }
 
 int32 UGameItem::GetTagStat(FGameplayTag Tag) const
 {
 	return TagStats.GetStackCount(Tag);
+}
+
+void UGameItem::AddTagStat(FGameplayTag Tag, int32 DeltaValue)
+{
+	SetTagStat(Tag, GetTagStat(Tag) + DeltaValue);
+}
+
+void UGameItem::RemoveTagStat(FGameplayTag Tag, int32 DeltaValue)
+{
+	SetTagStat(Tag, GetTagStat(Tag) - DeltaValue);
+}
+
+const TMap<FGameplayTag, int32>& UGameItem::GetAllTagStats() const
+{
+	return TagStats.StackCountMap;
 }
 
 bool UGameItem::IsMatching(const UGameItem* Item) const
@@ -90,29 +112,104 @@ bool UGameItem::IsMatching(const UGameItem* Item) const
 
 void UGameItem::CopyItemProperties(const UGameItem* Item)
 {
-	Count = Item->Count;
-	TagStats = Item->TagStats;
+	if (Count != Item->Count)
+	{
+		Count = Item->Count;
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, Count, this);
+	}
+	if (TagStats != Item->TagStats)
+	{
+		TagStats = Item->TagStats;
+		TagStats.MarkArrayDirty();
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, TagStats, this);
+	}
 }
 
 TArray<UGameItemContainer*> UGameItem::GetContainers() const
 {
 	TArray<UGameItemContainer*> Result;
 	Algo::TransformIf(Containers, Result,
-	                  [](const TWeakObjectPtr<UGameItemContainer>& Container) { return Container.IsValid(); },
-	                  [](const TWeakObjectPtr<UGameItemContainer>& Container) { return Container.Get(); });
+		[](const TWeakObjectPtr<UGameItemContainer>& Container) { return Container.IsValid(); },
+		[](const TWeakObjectPtr<UGameItemContainer>& Container) { return Container.Get(); });
 	return Result;
 }
 
-FString UGameItem::ToDebugString() const
+FString UGameItem::GetDebugString() const
 {
-	return FString::Printf(TEXT("%s (%sx%d)"), *GetName(), *GetNameSafe(ItemDef), Count);
+	FString ItemDefName = GetNameSafe(ItemDef);
+	ItemDefName.RemoveFromEnd(TEXT("_C"));
+	return FString::Printf(TEXT("%s x%d (%s)"), *ItemDefName, Count, *GetName());
 }
 
-void UGameItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+bool UGameItem::HasPendingNetChange() const
 {
-	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	return PendingPredictionKey.IsValidKey();
+}
 
-	DOREPLIFETIME(ThisClass, ItemDef);
-	DOREPLIFETIME(ThisClass, Count);
-	DOREPLIFETIME(ThisClass, TagStats);
+void UGameItem::AcceptPendingNetChange()
+{
+	ResetPredictionState();
+}
+
+void UGameItem::RejectPendingNetChange()
+{
+	if (bIsPendingRemove)
+	{
+		// TODO: broadcast events for UI
+	}
+	if (PendingCount.IsSet())
+	{
+		// TODO: broadcast events for UI
+	}
+	ResetPredictionState();
+}
+
+void UGameItem::ResetPredictionState()
+{
+	PendingPredictionKey = FGameItemsPredictionKey();
+	bIsPendingRemove = false;
+	PendingRemoveContainer.Reset();
+	PendingCount.Reset();
+}
+
+void UGameItem::MarkPendingRemove(UGameItemContainer* FromContainer, const FGameItemsPredictionKey PredictionKey)
+{
+	check(FromContainer != nullptr);
+	check(!HasPendingNetChange() && !bIsPendingRemove && !PendingRemoveContainer.IsValid());
+	check(PredictionKey.IsLocalClientKey());
+
+	PendingPredictionKey = PredictionKey;
+	bIsPendingRemove = true;
+	PendingRemoveContainer = FromContainer;
+
+	// TODO: broadcast events for UI
+}
+
+void UGameItem::MarkPendingMove(const FGameItemsPredictionKey PredictionKey)
+{
+	check(!HasPendingNetChange());
+	
+	PendingPredictionKey = PredictionKey;
+
+	// TODO: broadcast events for UI
+}
+
+void UGameItem::SetPendingCount(int32 NewCount, const FGameItemsPredictionKey PredictionKey)
+{
+	check(!HasPendingNetChange() && !PendingCount.IsSet());
+
+	PendingPredictionKey = PredictionKey;
+	PendingCount = NewCount;
+
+	// TODO: broadcast events for UI
+}
+
+UGameItemContainer* UGameItem::GetPendingRemoveContainer() const
+{
+	return bIsPendingRemove ? PendingRemoveContainer.Get() : nullptr;
+}
+
+TOptional<int32> UGameItem::GetPendingCount() const
+{
+	return PendingCount;
 }

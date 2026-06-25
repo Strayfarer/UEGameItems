@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameItemTypes.h"
+#include "Engine/EngineTypes.h"
 #include "UObject/Object.h"
 #include "GameItemContainerRule.generated.h"
 
@@ -13,7 +14,7 @@ class UGameItemContainer;
 
 /**
  * Defines conditions and stock limitations for a game item container.
- * Rules can be stateful and are instantiated within each container they apply to.
+ * Rules can be stateful and are instantiated and replicated within the container they apply to.
  */
 UCLASS(BlueprintType, Blueprintable, Abstract, DefaultToInstanced, EditInlineNew)
 class GAMEITEMS_API UGameItemContainerRule : public UObject
@@ -23,14 +24,20 @@ class GAMEITEMS_API UGameItemContainerRule : public UObject
 public:
 	UGameItemContainerRule();
 
+	virtual bool IsSupportedForNetworking() const override { return true; }
+	virtual int32 GetFunctionCallspace(UFunction* Function, FFrame* Stack) override;
+	virtual bool CallRemoteFunction(UFunction* Function, void* Parms, struct FOutParmRec* OutParms, FFrame* Stack) override;
+
+	/** If set, save this rule's SaveGame data with the container, using this save name. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "SaveGame", meta = (EditCondition = "HasSaveData()", EditConditionHides))
+	FName SaveName;
+
+	/** Return the net role of the owning actor. */
+	ENetRole GetNetRole() const;
+
 	/** Return the owning container. */
-	UGameItemContainer* GetContainer() const { return Container; }
-
-	/** Initialize the rule. Called when added to a container. */
-	virtual void Initialize();
-
-	/** Uninitialize the rule. Called when removed from a container. */
-	virtual void Uninitialize();
+	UFUNCTION(BlueprintPure, Category = "GameItems")
+	UGameItemContainer* GetContainer() const;
 
 	/** Return true if this rule makes the container a child of another container, such that it cannot store its own items. */
 	UFUNCTION(BlueprintNativeEvent)
@@ -40,6 +47,10 @@ public:
 	UFUNCTION(BlueprintNativeEvent)
 	bool CanContainItem(const UGameItem* Item) const;
 
+	/** Return true if an item is allowed in the container by definition. */
+	UFUNCTION(BlueprintNativeEvent)
+	bool CanContainItemByDef(TSubclassOf<UGameItemDef> ItemDef) const;
+
 	/** Return the maximum allowed count for an item, or -1 if unlimited. */
 	UFUNCTION(BlueprintNativeEvent)
 	int32 GetItemMaxCount(const UGameItem* Item) const;
@@ -48,10 +59,13 @@ public:
 	UFUNCTION(BlueprintNativeEvent)
 	int32 GetItemStackMaxCount(const UGameItem* Item) const;
 
+	/** Return true if this Rule contains any SaveGame properties that should be saved with the container. */
+	UFUNCTION()
+	virtual bool HasSaveData() const { return false; }
+
+	virtual bool ShouldSaveData() const { return HasSaveData() && !SaveName.IsNone(); }
+
 	virtual UWorld* GetWorld() const override;
 
-protected:
-	/** The owning container of this rule. */
-	UPROPERTY(Transient, BlueprintReadOnly, Meta = (AllowPrivateAccess = true))
-	TObjectPtr<UGameItemContainer> Container;
+	virtual FString GetDebugString() const;
 };

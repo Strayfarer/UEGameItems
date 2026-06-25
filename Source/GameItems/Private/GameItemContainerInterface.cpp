@@ -15,7 +15,7 @@ TArray<FGameplayTag> IGameItemContainerInterface::GetAllItemContainerIds() const
 	TArray<FGameplayTag> Result;
 	Algo::Transform(AllContainers, Result, [](const UGameItemContainer* Container)
 	{
-		return Container->ContainerId;
+		return Container->GetContainerId();
 	});
 	return Result;
 }
@@ -28,4 +28,25 @@ UGameItemContainer* IGameItemContainerInterface::GetItemContainer(FGameplayTag C
 UGameItemContainer* IGameItemContainerInterface::GetDefaultItemContainer() const
 {
 	return GetItemContainer(UGameItemSettings::GetDefaultContainerId());
+}
+
+UGameItemContainer* IGameItemContainerInterface::GetDefaultContainerForItem(TSubclassOf<UGameItemDef> ItemDef) const
+{
+	// check if the default is compatible
+	UGameItemContainer* DefaultContainer = GetDefaultItemContainer();
+	if (DefaultContainer && DefaultContainer->CanContainItemByDef(ItemDef))
+	{
+		return DefaultContainer;
+	}
+
+	// otherwise return the first parent container that supports the item
+	for (UGameItemContainer* Container : GetAllItemContainers())
+	{
+		if (Container != DefaultContainer && !Container->IsChild() && Container->CanContainItemByDef(ItemDef))
+		{
+			return Container;
+		}
+	}
+
+	return nullptr;
 }

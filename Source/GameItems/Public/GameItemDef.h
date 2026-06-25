@@ -6,7 +6,6 @@
 #include "GameItemFragment.h"
 #include "GameItemTypes.h"
 #include "GameplayTagContainer.h"
-#include "Engine/DataAsset.h"
 #include "GameItemDef.generated.h"
 
 
@@ -20,8 +19,17 @@ class GAMEITEMS_API UGameItemDef : public UObject
 	GENERATED_BODY()
 
 public:
+	UGameItemDef(const FObjectInitializer& ObjectInitializer);
+
+	/**
+	 * The game item class to instances for this definition.
+	 * This allows extending transient or saved state per item instance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameItem", NoClear, AdvancedDisplay)
+	TSubclassOf<UGameItem> ItemClass;
+
 	/** The tags that this item has. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameItem")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameItem", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagContainer OwnedTags;
 
 	/** The user-facing display name. */
@@ -45,7 +53,7 @@ public:
 	TArray<TObjectPtr<UGameItemFragment>> Fragments;
 
 	/** Find and return a fragment of this item definition by class. */
-	UFUNCTION(BlueprintCallable, BlueprintPure = false, Meta = (DeterminesOutputType = "FragmentClass"))
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItems", Meta = (DeterminesOutputType = "FragmentClass"))
 	const UGameItemFragment* FindFragment(TSubclassOf<UGameItemFragment> FragmentClass) const;
 
 	/** Find and return a fragment of this item definition by class. */
@@ -55,6 +63,11 @@ public:
 		static_assert(TIsDerivedFrom<T, UGameItemFragment>::IsDerived, TEXT("T must be a UGameItemFragment type"));
 		return (T*)FindFragment(T::StaticClass());
 	}
+
+#if WITH_EDITOR
+	/** Return the editor icon for this item. */
+	virtual TOptional<struct FSlateBrush> GetEditorIcon() const;
+#endif
 
 protected:
 	UGameItemFragment* FindFragmentInternal(TSubclassOf<UGameItemFragment> FragmentClass) const;

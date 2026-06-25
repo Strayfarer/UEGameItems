@@ -3,11 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameEquipmentTypes.h"
+#include "GameItemTypes.h"
 #include "Templates/SubclassOf.h"
 #include "UObject/Object.h"
 #include "GameEquipment.generated.h"
 
+class UGameEquipmentComponent;
 class UGameEquipmentDef;
+class USceneComponent;
 
 
 /**
@@ -21,16 +25,22 @@ class GAMEITEMS_API UGameEquipment : public UObject
 public:
 	UGameEquipment(const FObjectInitializer& ObjectInitializer);
 
+	virtual UWorld* GetWorld() const override;
 	virtual bool IsSupportedForNetworking() const override { return true; }
-	virtual UWorld* GetWorld() const override final;
 
-	/** Set the definition of this equipment. */
-	void SetEquipmentDef(TSubclassOf<UGameEquipmentDef> InEquipmentDef);
+	virtual FString GetReadableName() const;
+
+	/** Set the spec of this equipment, which contains it's definition and other stats. */
+	void SetEquipmentSpec(const FGameEquipmentSpec& InSpec);
+
+	const FGameEquipmentSpec& GetEquipmentSpec() const { return EquipmentSpec; }
 
 	/** Return the definition of this equipment. */
-	TSubclassOf<UGameEquipmentDef> GetEquipmentDef() const { return EquipmentDef; }
+	UFUNCTION(BlueprintPure, Category = "Equipment")
+	TSubclassOf<UGameEquipmentDef> GetEquipmentDef() const { return EquipmentSpec.EquipmentDef; }
 
 	/** Return the class default object for the definition of this equipment. */
+	UFUNCTION(BlueprintPure, Category = "Equipment")
 	const UGameEquipmentDef* GetEquipmentDefCDO() const;
 
 	/** Return the equipment definition class default object cast to a type. */
@@ -40,54 +50,62 @@ public:
 		return Cast<T>(GetEquipmentDefCDO());
 	}
 
+	/** Return the context tags for this equipment. */
+	UFUNCTION(BlueprintPure, Category = "Equipment")
+	FGameplayTagContainer GetContextTags() const { return EquipmentSpec.ContextTags; }
+
+	UFUNCTION(BlueprintPure, Category = "Equipment")
+	const TMap<FGameplayTag, int32>& GetTagStats() const { return EquipmentSpec.GetTagStatsMap(); }
+
+	/** Return the owning equipment component. */
+	UFUNCTION(BlueprintPure, Category = "Equipment")
+	virtual UGameEquipmentComponent* GetOwner() const;
+
 	/** Return the owning Actor of this equipment. */
 	UFUNCTION(BlueprintPure, Category = "Equipment")
-	virtual AActor* GetOwner() const;
-
-	/** Return the instigator responsible for applying this equipment. */
-	UObject* GetInstigator() const { return Instigator; }
-
-	/** Set the instigator responsible for applying this equipment. */
-	void SetInstigator(UObject* InInstigator) { Instigator = InInstigator; }
+	virtual AActor* GetOwningActor() const;
 
 	/** Return all actors that this equipment has spawned. */
 	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "Equipment")
-	TArray<AActor*> GetSpawnedActors() const { return SpawnedActors; }
+	TArray<AActor*> GetSpawnedActors() const;
 
 	/** Return the first spawned actor of a specific class. */
 	UFUNCTION(BlueprintPure, Meta = (DeterminesOutputType = "ActorClass"), Category = "Equipment")
 	AActor* GetSpawnedActorOfClass(TSubclassOf<AActor> ActorClass) const;
+
+	/** Activate this equipment (if not already). */
+	virtual void Equip();
+
+	/** Deactivate this equipment. */
+	virtual void Unequip();
+
+	/** Return the component that should be used as the attach parent for spawned actors. */
+	virtual USceneComponent* GetTargetAttachComponent() const;
+
+protected:
+	/** The specification used to create this equipment. */
+	UPROPERTY(Replicated, BlueprintReadOnly, meta = (AllowPrivateAccess))
+	FGameEquipmentSpec EquipmentSpec;
+
+	/** The actors this equipment has spawned. */
+	UPROPERTY(Transient, ReplicatedUsing = OnRep_SpawnedActors)
+	TArray<TObjectPtr<AActor>> SpawnedActors;
+
+	UFUNCTION()
+	void OnRep_SpawnedActors();
+
+	/** The unreplicated actors this equipment has spawned. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<AActor>> LocalSpawnedActors;
+
+	/** Is this equipment currently active? True after calling Equip. */
+	bool bIsEquipped = false;
 
 	/** Called when the equipment has been applied to an actor. */
 	virtual void OnEquipped();
 
 	/** Called when the equipment is removed from an actor. */
 	virtual void OnUnequipped();
-
-	/** Return the component that should be used as the attach parent for spawned actors. */
-	virtual USceneComponent* GetTargetAttachComponent() const;
-
-	/** Spawn all actors for this equipment. */
-	virtual void SpawnEquipmentActors();
-
-	/** Destroy all actors that this equipment has spawned. */
-	virtual void DestroyEquipmentActors();
-
-protected:
-	/** The definition for this equipment. */
-	UPROPERTY(Replicated, BlueprintReadOnly, Meta = (AllowPrivateAccess))
-	TSubclassOf<UGameEquipmentDef> EquipmentDef;
-
-	/** The instigator responsible for applying this equipment. */
-	UPROPERTY(ReplicatedUsing=OnRep_Instigator, BlueprintReadOnly, Meta = (AllowPrivateAccess))
-	TObjectPtr<UObject> Instigator;
-
-	UFUNCTION()
-	void OnRep_Instigator();
-
-	/** The actors this equipment has spawned. */
-	UPROPERTY(Replicated)
-	TArray<AActor*> SpawnedActors;
 
 	/** Called when the equipment is added to an actor. */
 	UFUNCTION(BlueprintImplementableEvent, Meta = (DisplayName = "OnEquipped"), Category = "Equipment")
@@ -96,4 +114,13 @@ protected:
 	/** Called when the equipment has been removed from an actor. */
 	UFUNCTION(BlueprintImplementableEvent, Meta = (DisplayName = "OnUnequipped"), Category = "Equipment")
 	void OnUnequipped_BP();
+
+	/** Spawn all actors for this equipment. */
+	virtual void SpawnEquipmentActors();
+
+	/** Attach a new equipment actor to the owner. */
+	virtual void AttachEquipmentActor(AActor* NewActor, USceneComponent* AttachTarget, const FGameEquipmentActorSpawnInfo& SpawnInfo);
+
+	/** Destroy all actors that this equipment has spawned. */
+	virtual void DestroyEquipmentActors();
 };

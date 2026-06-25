@@ -17,7 +17,11 @@
 #include "Engine/DataTable.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "GameFramework/Controller.h"
 #include "GameFramework/HUD.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+#include "Sound/SoundConcurrency.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(GameItemSubsystem)
 
@@ -32,6 +36,15 @@ void UGameItemSubsystem::Deinitialize()
 	AHUD::OnShowDebugInfo.RemoveAll(this);
 }
 
+bool UGameItemSubsystem::ShouldCreateSubsystem(UObject* Outer) const
+{
+	TArray<UClass*> ChildClasses;
+	GetDerivedClasses(GetClass(), ChildClasses, false);
+
+	// only create an instance if there is no overridden implementation
+	return ChildClasses.Num() == 0;
+}
+
 UGameItem* UGameItemSubsystem::CreateItem(UObject* Outer, TSubclassOf<UGameItemDef> ItemDef, int32 Count)
 {
 	if (!ItemDef)
@@ -39,7 +52,14 @@ UGameItem* UGameItemSubsystem::CreateItem(UObject* Outer, TSubclassOf<UGameItemD
 		return nullptr;
 	}
 
-	UGameItem* NewItem = NewObject<UGameItem>(Outer);
+	const UGameItemDef* ItemDefCDO = ItemDef->GetDefaultObject<UGameItemDef>();
+	TSubclassOf<UGameItem> ItemClass = ItemDefCDO->ItemClass;
+	if (!ensureMsgf(ItemClass, TEXT("%s.ItemClass is not valid"), *ItemDef->GetName()))
+	{
+		ItemClass = UGameItem::StaticClass();
+	}
+
+	UGameItem* NewItem = NewObject<UGameItem>(Outer, ItemClass);
 	NewItem->SetItemDef(ItemDef);
 	NewItem->SetCount(Count);
 
@@ -55,39 +75,92 @@ UGameItem* UGameItemSubsystem::CreateItem(UObject* Outer, TSubclassOf<UGameItemD
 	return NewItem;
 }
 
-TArray<UGameItem*> UGameItemSubsystem::CreateItemInContainer(UGameItemContainer* Container, TSubclassOf<UGameItemDef> ItemDef, int32 Count)
+UGameItem* UGameItemSubsystem::CreateItemFromSaveData(UObject* Outer, const FGameItemSaveData& ItemSaveData)
 {
-	if (!Container || !Container->GetOwner())
+	const TSubclassOf<UGameItemDef> ItemDef = ItemSaveData.ItemDef.LoadSynchronous();
+	if (!ItemDef)
 	{
-		return TArray<UGameItem*>();
+		UE_LOG(LogGameItems, Warning, TEXT("Failed to load item def from save data: %s (Outer: %s)"),
+			*ItemSaveData.ItemDef.ToString(), *GetNameSafe(Outer));
+		return nullptr;
 	}
 
-	UGameItem* NewItem = CreateItem(Container->GetOwner(), ItemDef, Count);
-	if (!NewItem)
-	{
-		return TArray<UGameItem*>();
-	}
+	UGameItem* NewItem = CreateItem(Outer, ItemDef);
+	check(NewItem);
 
-	TArray<UGameItem*> AddedItems = Container->AddItem(NewItem);
-	return AddedItems;
+	// serialize item properties (including count)
+	FMemoryReader MemReader(ItemSaveData.ByteData);
+	FObjectAndNameAsStringProxyArchive Ar(MemReader, true);
+	Ar.ArIsSaveGame = true;
+	NewItem->Serialize(Ar);
+
+	return NewItem;
 }
 
-UGameItem* UGameItemSubsystem::DuplicateItem(UObject* Outer, UGameItem* Item, int32 Count)
+void UGameItemSubsystem::CreateItemInContainer(UGameItemContainer* Container, TSubclassOf<UGameItemDef> ItemDef, int32 Count, bool bWarn)
+{
+	if (!Container || !Container->GetItemOuter())
+	{
+		return;
+	}
+
+	// TODO: ensure we're creating items in a local owned container (e.g. not creating on client then attempting to add to server-owned or vice versa)
+
+	// TODO: no way to check ahead of time and avoid creating items if we can't add?
+
+	UGameItem* NewItem = CreateItem(Container->GetItemOuter(), ItemDef, Count);
+	if (!NewItem)
+	{
+		return;
+	}
+
+	Container->AddItem(NewItem, -1, bWarn);
+}
+
+bool UGameItemSubsystem::HasItemStacks(UGameItemContainer* Container, TArray<FGameItemDefStack> ItemStacks) const
+{
+	for (const FGameItemDefStack& ItemStack : ItemStacks)
+	{
+		if (Container->GetTotalItemCountByDef(ItemStack.ItemDef) < ItemStack.Count)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool UGameItemSubsystem::RemoveItemStacks(UGameItemContainer* Container, TArray<FGameItemDefStack> ItemStacks, bool bAllowPartial) const
+{
+	if (!bAllowPartial)
+	{
+		if (!HasItemStacks(Container, ItemStacks))
+		{
+			return false;
+		}
+	}
+
+	for (const FGameItemDefStack& ItemStack : ItemStacks)
+	{
+		Container->RemoveItemsByDef(ItemStack.ItemDef, ItemStack.Count);
+	}
+
+	return true;
+}
+
+UGameItem* UGameItemSubsystem::DuplicateItem(UObject* Outer, UGameItem* Item)
 {
 	if (!Item)
 	{
 		return nullptr;
 	}
 
-	const int32 NewCount = Count > 0 ? Count : Item->GetCount();
-	UGameItem* NewItem = CreateItem(Outer, Item->GetItemDef(), NewCount);
+	UGameItem* NewItem = CreateItem(Outer, Item->GetItemDef());
 	if (!NewItem)
 	{
 		return nullptr;
 	}
 
 	NewItem->CopyItemProperties(Item);
-
 	return NewItem;
 }
 
@@ -99,29 +172,35 @@ UGameItem* UGameItemSubsystem::SplitItem(UObject* Outer, UGameItem* Item, int32 
 	}
 
 	Item->SetCount(Item->GetCount() - Count);
-	UGameItem* NewItem = DuplicateItem(Outer, Item, Count);
+	UGameItem* NewItem = DuplicateItem(Outer, Item);
+	NewItem->SetCount(Count);
 	return NewItem;
 }
 
-TArray<UGameItem*> UGameItemSubsystem::MoveItem(UGameItemContainer* FromContainer, UGameItemContainer* ToContainer,
-                                                UGameItem* Item, int32 TargetSlot, bool bAllowPartial)
+void UGameItemSubsystem::MoveItem(UGameItemContainer* FromContainer, UGameItemContainer* ToContainer, UGameItem* Item, int32 TargetSlot, bool bAllowPartial)
 {
 	if (!FromContainer || !ToContainer || !FromContainer->Contains(Item))
 	{
-		return TArray<UGameItem*>();
+		return;
+	}
+	if (FromContainer == ToContainer)
+	{
+		UE_LOG(LogGameItems, Verbose, TEXT("[%hs] Nothing to do, From and To container are the same: %s"),
+			__FUNCTION__, *FromContainer->GetReadableName());
+		return;
 	}
 
 	const FGameItemContainerAddPlan Plan = ToContainer->CheckAddItem(Item, TargetSlot, FromContainer);
 	if (Plan.DeltaCount == 0)
 	{
 		// nothing to move
-		return TArray<UGameItem*>();
+		return;
 	}
 
 	// don't allow partial move
 	if (!bAllowPartial && !Plan.bWillAddFullAmount)
 	{
-		return TArray<UGameItem*>();
+		return;
 	}
 
 	// split the item if needed
@@ -129,7 +208,7 @@ TArray<UGameItem*> UGameItemSubsystem::MoveItem(UGameItemContainer* FromContaine
 	if (Plan.RemainderCount > 0)
 	{
 		check(Item->GetCount() > Plan.DeltaCount);
-		ItemToAdd = SplitItem(ToContainer->GetOwner(), Item, Plan.DeltaCount);
+		ItemToAdd = SplitItem(ToContainer->GetItemOuter(), Item, Plan.DeltaCount);
 		check(ItemToAdd);
 	}
 	else
@@ -139,31 +218,110 @@ TArray<UGameItem*> UGameItemSubsystem::MoveItem(UGameItemContainer* FromContaine
 	}
 
 	// add the item
-	TArray<UGameItem*> Result = ToContainer->AddItem(ItemToAdd, TargetSlot);
-
-	return Result;
+	ToContainer->AddItem(ItemToAdd, TargetSlot);
 }
 
-TArray<UGameItem*> UGameItemSubsystem::MoveItems(UGameItemContainer* FromContainer, UGameItemContainer* ToContainer,
-                                                 TArray<UGameItem*> Items, bool bAllowPartial)
+void UGameItemSubsystem::MoveItems(
+	UGameItemContainer* FromContainer,
+	UGameItemContainer* ToContainer,
+	TArray<UGameItem*> Items,
+	bool bAllowPartial)
 {
-	TArray<UGameItem*> Result;
 	for (UGameItem* Item : Items)
 	{
-		TArray<UGameItem*> ItemResult = MoveItem(FromContainer, ToContainer, Item, -1, bAllowPartial);
-		Result.Append(ItemResult);
+		MoveItem(FromContainer, ToContainer, Item, -1, bAllowPartial);
 	}
-	return Result;
 }
 
-TArray<UGameItem*> UGameItemSubsystem::MoveAllItems(UGameItemContainer* FromContainer, UGameItemContainer* ToContainer, bool bAllowPartial)
+void UGameItemSubsystem::MoveAllItems(UGameItemContainer* FromContainer, UGameItemContainer* ToContainer, bool bAllowPartial)
 {
-	if (FromContainer)
+	if (!FromContainer)
 	{
-		const TArray<UGameItem*> Items = FromContainer->GetAllItems();
-		return MoveItems(FromContainer, ToContainer, Items, bAllowPartial);
+		return;
 	}
-	return TArray<UGameItem*>();
+
+	// TODO: optimize
+	const TMap<int32, UGameItem*> ItemsBySlot = FromContainer->GetAllItems();
+	TArray<UGameItem*> Items;
+	ItemsBySlot.GenerateValueArray(Items);
+	MoveItems(FromContainer, ToContainer, Items, bAllowPartial);
+}
+
+bool UGameItemSubsystem::MoveSwapOrStackItem(UGameItemContainer* From, UGameItem* Item, UGameItemContainer* To, int32 ToSlot, bool bAllowPartial)
+{
+	if (!From || !To)
+	{
+		UE_LOG(LogGameItems, Warning, TEXT("[%hs] Invalid container. From: %s, To: %s"),
+			__FUNCTION__, *GetNameSafe(From), *GetNameSafe(To));
+		return false;
+	}
+
+	if (!To->IsValidSlot(ToSlot))
+	{
+		UE_LOG(LogGameItems, Warning, TEXT("%s[%hs] Slot %d is not valid in To container: %s"),
+			*UGameItemStatics::GetNetDebugPrefix(this), __func__, ToSlot, *To->GetReadableName());
+		return false;
+	}
+
+	int32 FromSlot = From->GetItemSlot(Item);
+	if (FromSlot == INDEX_NONE)
+	{
+		UE_LOG(LogGameItems, Warning, TEXT("%s[%hs] Item %s not found in From container: %s"),
+			*UGameItemStatics::GetNetDebugPrefix(this), __func__, *Item->GetDebugString(), *From->GetReadableName());
+		return false;
+	}
+
+	const UGameItem* ToItem = To->GetItemAt(ToSlot);
+
+	if (From == To)
+	{
+		// same container
+
+		if (FromSlot == ToSlot)
+		{
+			// same slot
+			UE_LOG(LogGameItems, VeryVerbose, TEXT("[%hs] Same slot, nothing to do: %s Slot: %d -> %d"),
+				__FUNCTION__, *From->GetReadableName(), FromSlot, ToSlot);
+			return false;
+		}
+
+		if (Item->IsMatching(ToItem) && !To->IsStackFull(ToSlot))
+		{
+			// TODO: if not allowing partial, and item cant fully fit in the target stack, fallback to swap
+			// stack items
+			To->StackItems(FromSlot, ToSlot, bAllowPartial);
+		}
+		else
+		{
+			// swap items in the container
+			To->SwapItems(FromSlot, ToSlot);
+		}
+	}
+	else if (To->IsChild())
+	{
+		// assign / replace item to a child container
+		if (ToItem)
+		{
+			To->RemoveItemAt(ToSlot);
+		}
+		const int32 ExistingItemSlot = To->GetItemSlot(Item);
+		if (ExistingItemSlot != INDEX_NONE)
+		{
+			// re-assigning an item from parent container, just move the item to the new location
+			To->SwapItems(ExistingItemSlot, ToSlot);
+		}
+		else
+		{
+			// assign new item
+			To->AddItem(Item, ToSlot);
+		}
+	}
+	else
+	{
+		// move from another container
+		MoveItem(From, To, Item, ToSlot, bAllowPartial);
+	}
+	return true;
 }
 
 TArray<FGameItemDefStack> UGameItemSubsystem::SelectItemsFromDropTable(const FGameItemDropContext& Context, FDataTableRowHandle DropTableEntry)
@@ -197,13 +355,7 @@ TArray<UGameItem*> UGameItemSubsystem::CreateItemsFromDropTable(UObject* Outer, 
 
 const UGameItemFragment* UGameItemSubsystem::FindFragment(TSubclassOf<UGameItemDef> ItemDef, TSubclassOf<UGameItemFragment> FragmentClass) const
 {
-	if (!ItemDef || !FragmentClass)
-	{
-		return nullptr;
-	}
-
-	const UGameItemDef* ItemDefCDO = GetDefault<UGameItemDef>(ItemDef);
-	return ItemDefCDO->FindFragment(FragmentClass);
+	return UGameItemStatics::FindFragment(ItemDef, FragmentClass);
 }
 
 UGameItemContainerComponent* UGameItemSubsystem::GetContainerComponentForActor(const AActor* Actor) const
@@ -267,9 +419,24 @@ void UGameItemSubsystem::OnShowDebugInfo(AHUD* HUD, UCanvas* Canvas, const FDebu
 		return;
 	}
 
+	FString NetSuffix;
+	switch (HUD->GetNetMode())
+	{
+	case NM_DedicatedServer:
+	case NM_ListenServer:
+		NetSuffix = FString::Printf(TEXT("(Server)"));
+		break;
+	case NM_Client:
+		NetSuffix = FString::Printf(TEXT("(Client %d)"), UE::GetPlayInEditorID());
+		break;
+	case NM_Standalone:
+	default: ;
+	}
+
 	FDisplayDebugManager& DisplayDebugManager = Canvas->DisplayDebugManager;
 	DisplayDebugManager.SetDrawColor(FColor::Yellow);
-	DisplayDebugManager.DrawString(TEXT("GAME ITEMS"));
+
+	DisplayDebugManager.DrawString(FString::Printf(TEXT("GAME ITEMS %s"), *NetSuffix));
 
 	// display debug info for all containers of the target actor
 	TArray<UGameItemContainer*> Containers = GetAllContainersForActor(HUD->GetCurrentDebugTargetActor());
@@ -284,8 +451,13 @@ void UGameItemSubsystem::OnShowDebugInfo(AHUD* HUD, UCanvas* Canvas, const FDebu
 	}
 }
 
-UGameItemSubsystem* UGameItemSubsystem::GetGameItemSubsystem(const UObject* WorldContextObject)
+UGameItemSubsystem* UGameItemSubsystem::Get(const UObject* WorldContextObject)
 {
 	const UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 	return World ? UGameInstance::GetSubsystem<UGameItemSubsystem>(World->GetGameInstance()) : nullptr;
+}
+
+UGameItemSubsystem* UGameItemSubsystem::GetGameItemSubsystem(const UObject* WorldContextObject)
+{
+	return Get(WorldContextObject);
 }

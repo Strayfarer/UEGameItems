@@ -7,9 +7,13 @@
 #include "NativeGameplayTags.h"
 #include "GameItemAutoSlotRule_Basic.generated.h"
 
-UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_AutoSlot_NoReplace);
-UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_AutoSlot_Replace);
-UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_AutoSlot_Toggle);
+
+namespace GameItems::GameplayTags
+{
+	GAMEITEMS_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Item_AutoSlot_NoReplace);
+	GAMEITEMS_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Item_AutoSlot_Replace);
+	GAMEITEMS_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Item_AutoSlot_Toggle);
+}
 
 
 /**
@@ -30,31 +34,34 @@ public:
 	UGameItemAutoSlotRule_Basic();
 
 	/** The base priority of the container when being selected for auto-slotting. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Slot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Auto Slot")
 	int32 Priority;
 
 	/**
 	 * Should existing items be replaced by default?
 	 * 'Item.AutoSlot.NoReplace' or 'Item.AutoSlot.Replace' context tags can override this setting.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Slot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Auto Slot")
 	bool bReplaceByDefault;
 
 	/** Items must have all of these tags to be auto slotted. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tag Requirements")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Tag Requirements", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagContainer RequireTags;
 
 	/** Items cannot have any of these tags to be auto slotted. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tag Requirements")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Tag Requirements", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagContainer IgnoreTags;
 
 	/** Items must match this query to be auto slotted. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tag Requirements")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "Tag Requirements", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagQuery Query;
 
-	virtual bool CanAutoSlot_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
-	virtual int32 GetAutoSlotPriorityForItem_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
-	virtual bool TryAutoSlot_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags, TArray<UGameItem*>& OutItems) const override;
-	virtual int32 GetBestSlotForItem_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
-	virtual bool ShouldReplaceItem_Implementation(UGameItem* NewItem, UGameItem* ExistingItem, const FGameplayTagContainer& ContextTags) const override;
+	virtual bool CanAutoSlot_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
+	virtual int32 GetAutoSlotPriorityForItem_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
+	virtual void TryAutoSlotInternal_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
+	virtual int32 GetBestSlotForItem_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const override;
+	virtual bool ShouldReplaceItem_Implementation(const UGameItem* NewItem, const UGameItem* ExistingItem,
+	                                              const FGameplayTagContainer& ContextTags) const override;
+
+	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 };

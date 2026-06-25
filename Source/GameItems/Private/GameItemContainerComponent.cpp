@@ -5,28 +5,78 @@
 
 #include "GameItemContainer.h"
 #include "GameItemContainerDef.h"
+#include "GameItemContainerGraph.h"
 #include "GameItemDef.h"
 #include "GameItemSaveDataInterface.h"
 #include "GameItemSettings.h"
+#include "GameItemsModule.h"
+#include "GameItemStatics.h"
 #include "Engine/ActorChannel.h"
 #include "Engine/World.h"
 #include "GameFramework/SaveGame.h"
+#include "Logging/MessageLog.h"
+#include "Misc/UObjectToken.h"
+#include "Net/UnrealNetwork.h"
 #include "Rules/GameItemContainerLink.h"
+
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(GameItemContainerComponent)
 
 
 UGameItemContainerComponent::UGameItemContainerComponent(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer),
-	  bEnableSaveGame(false),
-	  SaveCollectionId(NAME_None),
-	  bIsPlayerCollection(false)
+	: Super(ObjectInitializer)
 {
 	bWantsInitializeComponent = true;
 	SetIsReplicatedByDefault(true);
+}
 
-	FGameItemContainerSpec& DefaultContainerSpec = StartupContainers.AddDefaulted_GetRef();
-	DefaultContainerSpec.ContainerId = UGameItemSettings::GetDefaultContainerId();
+void UGameItemContainerComponent::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	FDoRepLifetimeParams Params;
+	Params.bIsPushBased = true;
+
+	DOREPLIFETIME_WITH_PARAMS_FAST(UGameItemContainerComponent, Containers, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(UGameItemContainerComponent, Links, Params);
+}
+
+void UGameItemContainerComponent::PostLoad()
+{
+	Super::PostLoad();
+
+#if !NO_LOGGING
+	if (!ContainerLinks.IsEmpty())
+	{
+		UE_LOG(LogGameItems, Error, TEXT("[%s] ContainerLinks set on the component are deprecated, use DefaultContainerGraphs instead"),
+		       *GetReadableName());
+	}
+#endif
+}
+
+void UGameItemContainerComponent::Serialize(FArchive& Ar)
+{
+	if (Ar.IsSaveGame())
+	{
+		FGameItemContainerCollectionSaveData CollectionData;
+
+		if (!Ar.IsLoading())
+		{
+			CommitSaveData(CollectionData);
+		}
+
+		static FGameItemContainerCollectionSaveData Defaults;
+		FGameItemContainerCollectionSaveData::StaticStruct()->SerializeItem(Ar, &CollectionData, &Defaults);
+
+		if (Ar.IsLoading())
+		{
+			LoadSaveData(CollectionData);
+		}
+	}
+	else
+	{
+		Super::Serialize(Ar);
+	}
 }
 
 void UGameItemContainerComponent::InitializeComponent()
@@ -41,7 +91,15 @@ void UGameItemContainerComponent::InitializeComponent()
 
 	if (GetOwner()->HasAuthority())
 	{
-		CreateStartupContainers();
+		if (bAutoAddDefaultContainers)
+		{
+			AddDefaultContainers();
+		}
+	}
+
+	if (bAutoAddDefaultItems)
+	{
+		CreateDefaultItems();
 	}
 }
 
@@ -49,47 +107,75 @@ void UGameItemContainerComponent::ReadyForReplication()
 {
 	Super::ReadyForReplication();
 
-	// TODO: register any existing containers...
 	// register any existing items
-	// if (IsUsingRegisteredSubObjectList())
-	// {
-	// 	for (const FGameItemListEntry& Entry : ItemList.Entries)
-	// 	{
-	// 		if (IsValid(Entry.GetItem()))
-	// 		{
-	// 			AddReplicatedSubObject(Entry.GetItem());
-	// 		}
-	// 	}
-	// }
+	if (IsUsingRegisteredSubObjectList())
+	{
+		for (UGameItemContainer* Container : Containers)
+		{
+			if (IsValid(Container))
+			{
+				AddReplicatedContainerSubObjects(Container);
+			}
+		}
+	}
 }
 
-bool UGameItemContainerComponent::ReplicateSubobjects(UActorChannel* Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags)
+void UGameItemContainerComponent::AddReplicatedContainerSubObjects(UGameItemContainer* Container)
 {
-	bool bDidWrite = Super::ReplicateSubobjects(Channel, Bunch, RepFlags);
+	AddReplicatedSubObject(Container);
 
-	// TODO: replicate all containers...
-	// replicate all item instances in this container
-	// for (const FGameItemListEntry& Entry : ItemList.Entries)
-	// {
-	// 	if (IsValid(Entry.GetItem()))
-	// 	{
-	// 		bDidWrite |= Channel->ReplicateSubobject(Entry.GetItem(), *Bunch, *RepFlags);
-	// 	}
-	// }
+	for (UGameItemContainerRule* Rule : Container->GetRules())
+	{
+		if (IsValid(Rule))
+		{
+			AddReplicatedSubObject(Rule);
+		}
+	}
 
-	return bDidWrite;
+	if (!Container->IsChild())
+	{
+		for (const auto& Elem : Container->GetAllItems())
+		{
+			if (UGameItem* Item = Elem.Value)
+			{
+				AddReplicatedSubObject(Item);
+			}
+		}
+	}
+}
+
+void UGameItemContainerComponent::RemoveReplicatedContainerSubObjects(UGameItemContainer* Container)
+{
+	RemoveReplicatedSubObject(Container);
+
+	for (UGameItemContainerRule* Rule : Container->GetRules())
+	{
+		if (IsValid(Rule))
+		{
+			RemoveReplicatedSubObject(Rule);
+		}
+	}
+
+	if (!Container->IsChild())
+	{
+		for (const auto& Elem : Container->GetAllItems())
+		{
+			if (UGameItem* Item = Elem.Value)
+			{
+				RemoveReplicatedSubObject(Item);
+			}
+		}
+	}
 }
 
 TArray<UGameItemContainer*> UGameItemContainerComponent::GetAllItemContainers() const
 {
-	TArray<UGameItemContainer*> AllContainers;
-	Containers.GenerateValueArray(AllContainers);
-	return AllContainers;
+	return Containers;
 }
 
 UGameItemContainer* UGameItemContainerComponent::GetItemContainer(FGameplayTag ContainerId) const
 {
-	return Containers.FindRef(ContainerId);
+	return ContainerMap.FindRef(ContainerId);
 }
 
 int32 UGameItemContainerComponent::GetTotalMatchingItemCount(const UGameItem* Item) const
@@ -101,12 +187,12 @@ int32 UGameItemContainerComponent::GetTotalMatchingItemCount(const UGameItem* It
 
 	// TODO: cache the counts for faster lookup
 	int32 Result = 0;
-	for (const auto& Elem : Containers)
+	for (const UGameItemContainer* Container : Containers)
 	{
 		// only parent containers contribute to collection count
-		if (!Elem.Value->IsChild())
+		if (IsValid(Container) && !Container->IsChild())
 		{
-			Result += Elem.Value->GetTotalMatchingItemCount(Item);
+			Result += Container->GetTotalMatchingItemCount(Item);
 		}
 	}
 	return Result;
@@ -121,12 +207,12 @@ int32 UGameItemContainerComponent::GetTotalMatchingItemCountByDef(TSubclassOf<UG
 
 	// TODO: cache the counts for faster lookup
 	int32 Result = 0;
-	for (const auto& Elem : Containers)
+	for (const UGameItemContainer* Container : Containers)
 	{
 		// only parent containers contribute to collection count
-		if (!Elem.Value->IsChild())
+		if (IsValid(Container) && !Container->IsChild())
 		{
-			Result += Elem.Value->GetTotalItemCountByDef(ItemDef);
+			Result += Container->GetTotalItemCountByDef(ItemDef);
 		}
 	}
 	return Result;
@@ -142,35 +228,13 @@ void UGameItemContainerComponent::CommitSaveGame(USaveGame* SaveGame)
 
 	FPlayerAndWorldGameItemSaveData& AllSaveData = ItemSaveDataInterface->GetItemSaveData();
 	FGameItemContainerCollectionSaveData& CollectionData = bIsPlayerCollection
-		                                                       ? AllSaveData.PlayerItemData.FindOrAdd(SaveCollectionId)
-		                                                       : AllSaveData.WorldItemData.FindOrAdd(SaveCollectionId);
+		? AllSaveData.PlayerItemData.FindOrAdd(SaveCollectionId)
+		: AllSaveData.WorldItemData.FindOrAdd(SaveCollectionId);
 
-	TMap<UGameItem*, FGuid> SavedItems;
-
-	// save parent containers
-	for (const auto& ContainerElem : Containers)
-	{
-		UGameItemContainer* Container = ContainerElem.Value;
-		if (!Container->IsChild())
-		{
-			FGameItemContainerSaveData& ContainerData = CollectionData.Containers.FindOrAdd(Container->ContainerId);
-			Container->CommitSaveData(ContainerData, SavedItems);
-		}
-	}
-
-	// ...then save all children, now that item guids have been created
-	for (const auto& ContainerElem : Containers)
-	{
-		UGameItemContainer* Container = ContainerElem.Value;
-		if (Container->IsChild())
-		{
-			FGameItemContainerSaveData& ContainerData = CollectionData.Containers.FindOrAdd(Container->ContainerId);
-			Container->CommitSaveData(ContainerData, SavedItems);
-		}
-	}
+	CommitSaveData(CollectionData);
 }
 
-void UGameItemContainerComponent::LoadSaveGame(USaveGame* SaveGame)
+void UGameItemContainerComponent::LoadSaveGame(USaveGame* SaveGame, bool bPreserveExistingItems)
 {
 	IGameItemSaveDataInterface* ItemSaveDataInterface = Cast<IGameItemSaveDataInterface>(SaveGame);
 	if (!ItemSaveDataInterface)
@@ -180,62 +244,169 @@ void UGameItemContainerComponent::LoadSaveGame(USaveGame* SaveGame)
 
 	FPlayerAndWorldGameItemSaveData& AllSaveData = ItemSaveDataInterface->GetItemSaveData();
 	const FGameItemContainerCollectionSaveData& CollectionData = bIsPlayerCollection
-		                                                             ? AllSaveData.PlayerItemData.FindOrAdd(SaveCollectionId)
-		                                                             : AllSaveData.WorldItemData.FindOrAdd(SaveCollectionId);
+		? AllSaveData.PlayerItemData.FindOrAdd(SaveCollectionId)
+		: AllSaveData.WorldItemData.FindOrAdd(SaveCollectionId);
+
+	LoadSaveData(CollectionData, bPreserveExistingItems);
+
+	OnSaveGameLoadedEvent.Broadcast(SaveGame);
+}
+
+void UGameItemContainerComponent::CommitSaveData(FGameItemContainerCollectionSaveData& CollectionData)
+{
+	TMap<UGameItem*, FGuid> SavedItems;
+
+	// save parent containers
+	for (UGameItemContainer* Container : Containers)
+	{
+		if (!IsValid(Container) || Container->IsChild())
+		{
+			continue;
+		}
+
+		if (!Container->HasSaveAndLoadAuthority())
+		{
+			UE_LOG(LogGameItems, Verbose, TEXT("[%hs] Skipping container with no save/load authority: %s"),
+				__func__, *Container->GetReadableName());
+			continue;
+		}
+
+		FGameItemContainerSaveData& ContainerData = CollectionData.Containers.FindOrAdd(Container->GetContainerId());
+		Container->CommitSaveData(ContainerData, SavedItems);
+	}
+
+	// ...then save all children, now that item guids have been created
+	for (UGameItemContainer* Container : Containers)
+	{
+		if (!IsValid(Container) || !Container->IsChild())
+		{
+			continue;
+		}
+
+		if (!Container->HasSaveAndLoadAuthority())
+		{
+			UE_LOG(LogGameItems, Verbose, TEXT("[%hs] Skipping container with no save/load authority: %s"),
+				__func__, *Container->GetReadableName());
+			continue;
+		}
+
+		FGameItemContainerSaveData& ContainerData = CollectionData.Containers.FindOrAdd(Container->GetContainerId());
+		Container->CommitSaveData(ContainerData, SavedItems);
+	}
+}
+
+void UGameItemContainerComponent::LoadSaveData(const FGameItemContainerCollectionSaveData& CollectionData, bool bPreserveExistingItems)
+{
+	bIsLoadingSaveGame = true;
 
 	TMap<FGuid, UGameItem*> LoadedItems;
 
 	// load parent containers
-	for (const auto& ContainerElem : Containers)
+	for (UGameItemContainer* Container : Containers)
 	{
-		UGameItemContainer* Container = ContainerElem.Value;
-		if (!Container->IsChild())
+		if (!IsValid(Container) || Container->IsChild())
 		{
-			const FGameItemContainerSaveData ContainerData = CollectionData.Containers.FindRef(Container->ContainerId);
-			Container->LoadSaveData(ContainerData, LoadedItems);
+			continue;
 		}
+
+		// TODO: validate that there are no issues with local-authority and server-authority containers coexisting
+		if (!Container->HasSaveAndLoadAuthority())
+		{
+			UE_LOG(LogGameItems, Verbose, TEXT("[%hs] Skipping container with no save/load authority: %s"),
+				__func__, *Container->GetReadableName());
+			continue;
+		}
+
+		const FGameItemContainerSaveData ContainerData = CollectionData.Containers.FindRef(Container->GetContainerId());
+		Container->LoadSaveData(ContainerData, bPreserveExistingItems, LoadedItems);
 	}
 
 	// ...then load all children, now that items have been created
-	for (const auto& ContainerElem : Containers)
+	for (UGameItemContainer* Container : Containers)
 	{
-		UGameItemContainer* Container = ContainerElem.Value;
-		if (Container->IsChild())
+		if (!IsValid(Container) || !Container->IsChild())
 		{
-			const FGameItemContainerSaveData ContainerData = CollectionData.Containers.FindRef(Container->ContainerId);
-			Container->LoadSaveData(ContainerData, LoadedItems);
+			continue;
+		}
+
+		if (!Container->HasSaveAndLoadAuthority())
+		{
+			UE_LOG(LogGameItems, Verbose, TEXT("[%hs] Skipping container with no save/load authority: %s"),
+				__func__, *Container->GetReadableName());
+			continue;
+		}
+
+		const FGameItemContainerSaveData ContainerData = CollectionData.Containers.FindRef(Container->GetContainerId());
+		Container->LoadSaveData(ContainerData, bPreserveExistingItems, LoadedItems);
+	}
+
+	bIsLoadingSaveGame = false;
+
+	OnSaveDataLoadedEvent.Broadcast();
+}
+
+void UGameItemContainerComponent::AddDefaultContainers()
+{
+	if (!ensure(GetOwner()->HasAuthority()))
+	{
+		return;
+	}
+
+	for (const UGameItemContainerGraph* Graph : ObjectPtrDecay(DefaultContainerGraphs))
+	{
+		if (Graph)
+		{
+			AddContainerGraph(Graph, false);
+		}
+	}
+	
+	for (const FGameItemContainerSpec& ContainerSpec : DefaultContainers)
+	{
+		CreateContainer(ContainerSpec, false);
+	}
+
+	if (!ContainerLinks.IsEmpty())
+	{
+#if !NO_LOGGING
+		FMessageLog("PIE").Warning()
+		                  ->AddText(INVTEXT("ContainerLinks is deprecated, create a GameItemContainerGraph to setup multiple connected containers"))
+		                  ->AddToken(FUObjectToken::Create(GetOwner()->GetClass()));
+#endif
+
+		for (const FGameItemContainerLinkSpec& Link : ContainerLinks)
+		{
+			CreateContainerLink(Link, this, false);
+		}
+	}
+
+	ResolveAllContainerLinks();
+}
+
+void UGameItemContainerComponent::CreateDefaultItems(bool bForce)
+{
+	for (UGameItemContainer* Container : Containers)
+	{
+		if (Container->IsLocallyControlled())
+		{
+			Container->CreateDefaultItems(bForce);
 		}
 	}
 }
 
-void UGameItemContainerComponent::CreateStartupContainers()
+void UGameItemContainerComponent::ResolveAllContainerLinks(bool bForce)
 {
-	check(GetOwner()->HasAuthority());
-
-	for (const FGameItemContainerSpec& ContainerSpec : StartupContainers)
+	for (const TObjectPtr<UGameItemContainer>& Container : Containers)
 	{
-		UGameItemContainer* Container = CreateContainer(ContainerSpec.ContainerId, ContainerSpec.ContainerDef);
-		if (Container)
+		if (!IsValid(Container))
 		{
-			Container->DisplayName = ContainerSpec.DisplayName;
+			continue;
 		}
-	}
-}
 
-void UGameItemContainerComponent::ResolveContainerLinks()
-{
-	for (const auto& Elem : Containers)
-	{
-		const UGameItemContainer* Container = Elem.Value;
-		const TArray<UGameItemContainerRule*>& Rules = Container->GetRules();
-		for (UGameItemContainerRule* Rule : Rules)
+		for (UGameItemContainerRule* Rule : Container->GetRules())
 		{
 			if (UGameItemContainerLink* LinkRule = Cast<UGameItemContainerLink>(Rule))
 			{
-				if (!LinkRule->GetLinkedContainer() && LinkRule->LinkedContainerId.IsValid())
-				{
-					LinkRule->SetLinkedContainer(GetItemContainer(LinkRule->LinkedContainerId));
-				}
+				LinkRule->ResolveLinkedContainer(this, bForce);
 			}
 		}
 	}
@@ -257,22 +428,71 @@ bool UGameItemContainerComponent::IsItemSlotted(UGameItem* Item, FGameplayTagCon
 	return false;
 }
 
-UGameItemContainer* UGameItemContainerComponent::CreateContainer(FGameplayTag ContainerId, TSubclassOf<UGameItemContainerDef> ContainerDef)
+void UGameItemContainerComponent::AddContainerGraph(const UGameItemContainerGraph* Graph, bool bResolveLinks)
 {
-	if (Containers.Contains(ContainerId))
+	if (!ensure(GetOwner()->HasAuthority()))
 	{
-		// already exists, or invalid id
+		return;
+	}
+	if (!Graph)
+	{
+		UE_LOG(LogGameItems, Error, TEXT("%s AddContainerGraph called with null Graph"),
+		       *GetDebugPrefix());
+		return;
+	}
+
+	if (Graphs.Contains(Graph))
+	{
+		UE_LOG(LogGameItems, Warning, TEXT("%s Graph already added: %s"),
+		       *GetDebugPrefix(), *Graph->GetName());
+		return;
+	}
+
+	Graphs.Add(Graph);
+
+	UE_LOG(LogGameItems, VeryVerbose, TEXT("%s Adding container graph: %s"),
+	       *GetDebugPrefix(), *Graph->GetName());
+
+	// setup links first, so they exist for container add events
+	for (const FGameItemContainerLinkSpec& LinkSpec : Graph->Links)
+	{
+		CreateContainerLink(LinkSpec, Graph, false);
+	}
+
+	// create containers
+	for (const FGameItemContainerSpec& ContainerSpec : Graph->Containers)
+	{
+		CreateContainer(ContainerSpec, false);
+	}
+
+	if (bResolveLinks)
+	{
+		ResolveAllContainerLinks();
+	}
+}
+
+UGameItemContainer* UGameItemContainerComponent::CreateContainer(const FGameItemContainerSpec& ContainerSpec, bool bResolveLinks)
+{
+	if (!ensure(GetOwner()->HasAuthority()))
+	{
+		return nullptr;
+	}
+	if (!ContainerSpec.IsValid())
+	{
+		UE_LOG(LogGameItems, Warning, TEXT("%s Invalid container spec, make sure ContainerDef and ContainerId are set: %s"),
+		       *GetDebugPrefix(), *ContainerSpec.DisplayName.ToString());
 		return nullptr;
 	}
 
-	if (!ContainerDef)
+	if (ContainerMap.Contains(ContainerSpec.ContainerId))
 	{
-		// must provide a container def
+		UE_LOG(LogGameItems, Warning, TEXT("%s Container already exists with id: %s"),
+		       *GetDebugPrefix(), *ContainerSpec.ContainerId.ToString());
 		return nullptr;
 	}
 
 	// retrieve container class to spawn from the definition
-	const UGameItemContainerDef* DefCDO = GetDefault<UGameItemContainerDef>(ContainerDef);
+	const UGameItemContainerDef* DefCDO = GetDefault<UGameItemContainerDef>(ContainerSpec.ContainerDef);
 	TSubclassOf<UGameItemContainer> ContainerClass = DefCDO->ContainerClass;
 	if (!ContainerClass)
 	{
@@ -282,44 +502,283 @@ UGameItemContainer* UGameItemContainerComponent::CreateContainer(FGameplayTag Co
 	// create and initialize the new container
 	UGameItemContainer* NewContainer = NewObject<UGameItemContainer>(this, ContainerClass);
 	check(NewContainer);
-	NewContainer->ContainerId = ContainerId;
+	NewContainer->SetContainerId(ContainerSpec.ContainerId);
 	NewContainer->SetCollection(this);
-	NewContainer->SetContainerDef(ContainerDef);
+	NewContainer->SetContainerDef(ContainerSpec.ContainerDef);
+	NewContainer->DisplayName = ContainerSpec.DisplayName;
 
-	// add link rules
-	for (const FGameItemContainerLinkSpec& LinkSpec : ContainerLinks)
-	{
-		if (!LinkSpec.ContainerLinkClass)
-		{
-			continue;
-		}
-		if (LinkSpec.ContainerQuery.Matches(NewContainer->GetOwnedTags()))
-		{
-			UGameItemContainerLink* NewLink = NewContainer->AddRule<UGameItemContainerLink>(LinkSpec.ContainerLinkClass);
-			if (NewLink)
-			{
-				// just set the container id, then resolve this (and any other links) later
-				NewLink->LinkedContainerId = LinkSpec.LinkedContainerId;
-			}
-		}
-	}
+	UE_LOG(LogGameItems, VeryVerbose, TEXT("%s Created container: %s (%s)"),
+	       *GetDebugPrefix(), *ContainerSpec.ContainerId.ToString(), *ContainerSpec.ContainerDef->GetName().LeftChop(2));
 
+	// add any already-defined links
+	AddMatchingLinkRulesToContainer(NewContainer, Links);
+
+	// register container (and broadcast container add events)
 	AddContainer(NewContainer);
 
-	ResolveContainerLinks();
+	if (bResolveLinks)
+	{
+		ResolveAllContainerLinks();
+	}
 
 	return NewContainer;
 }
 
+void UGameItemContainerComponent::CreateContainerLink(const FGameItemContainerLinkSpec& LinkSpec, const UObject* SourceObject, bool bResolveLinks)
+{
+	if (!ensure(GetOwner()->HasAuthority()))
+	{
+		return;
+	}
+
+	const FActiveGameItemContainerLink& NewLink = Links.Emplace_GetRef(LinkSpec, SourceObject);
+
+	// add new link to existing containers (that match)
+	for (const TObjectPtr<UGameItemContainer>& Container : Containers)
+	{
+		if (IsValid(Container))
+		{
+			AddLinkRuleToContainer(Container, NewLink);
+		}
+	}
+
+	if (bResolveLinks)
+	{
+		ResolveAllContainerLinks();
+	}
+}
+
+bool UGameItemContainerComponent::ContainsItemInAnyContainer(const UGameItem* Item) const
+{
+	// reverse look-up by the item's containers
+	for (const UGameItemContainer* Container : Item->GetContainers())
+	{
+		if (Containers.Contains(Container))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void UGameItemContainerComponent::AddContainer(UGameItemContainer* Container)
 {
+	if (!ensure(GetOwner()->HasAuthority()))
+	{
+		return;
+	}
+
 	check(Container);
-	check(!Containers.Contains(Container->ContainerId));
+	ensureAlways(!Containers.Contains(Container));
+	ensureAlways(!ContainerMap.Contains(Container->GetContainerId()));
 
-	Containers.Add(Container->ContainerId, Container);
+	Containers.Emplace(Container);
+	MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, Containers, this);
 
-	AddReplicatedSubObject(Container);
+	ContainerMap.Emplace(Container->GetContainerId(), Container);
 
-	// add default items after loading save game and gameplay begins
-	Container->AddDefaultItems();
+	OnContainerAdded(Container);
+}
+
+void UGameItemContainerComponent::OnContainerAdded(UGameItemContainer* Container)
+{
+	check(Container);
+
+	if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+	{
+		AddReplicatedContainerSubObjects(Container);
+	}
+
+	// monitor for item and rule changes so that all subobjects can be replicated
+	Container->OnItemAddedEvent.AddUObject(this, &ThisClass::OnItemAddedToContainer, Container);
+	Container->OnPostItemRemovedEvent.AddUObject(this, &ThisClass::OnPostItemRemovedFromContainer, Container);
+	Container->OnRuleAddedEvent.AddUObject(this, &ThisClass::OnRuleAdded);
+	Container->OnRuleRemovedEvent.AddUObject(this, &ThisClass::OnRuleRemoved);
+
+	OnContainerAddedEvent.Broadcast(Container);
+}
+
+void UGameItemContainerComponent::OnContainerRemoved(UGameItemContainer* Container)
+{
+	check(Container);
+
+	if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+	{
+		RemoveReplicatedContainerSubObjects(Container);
+	}
+
+	Container->OnItemAddedEvent.RemoveAll(this);
+	Container->OnPostItemRemovedEvent.RemoveAll(this);
+	Container->OnRuleAddedEvent.RemoveAll(this);
+	Container->OnRuleRemovedEvent.RemoveAll(this);
+
+	OnContainerRemovedEvent.Broadcast(Container);
+}
+
+void UGameItemContainerComponent::AddMatchingLinkRulesToContainer(UGameItemContainer* Container, const TArray<FActiveGameItemContainerLink>& InLinks)
+{
+	check(Container);
+
+	for (const FActiveGameItemContainerLink& Link : InLinks)
+	{
+		AddLinkRuleToContainer(Container, Link);
+	}
+}
+
+void UGameItemContainerComponent::AddLinkRuleToContainer(UGameItemContainer* Container, const FActiveGameItemContainerLink& Link)
+{
+	check(Container);
+
+	if (!Link.LinkSpec.IsValid())
+	{
+		return;
+	}
+
+	if (Link.LinkSpec.ContainerQuery.Matches(Container->GetOwnedTags()))
+	{
+		if (UGameItemContainerLink* NewLink = Container->AddRule<UGameItemContainerLink>(Link.LinkSpec.ContainerLinkClass))
+		{
+			// set the id, but don't try to resolve containers yet, since they may not all exist yet
+			NewLink->LinkedContainerId = Link.LinkSpec.LinkedContainerId;
+
+			UE_LOG(LogGameItems, VeryVerbose, TEXT("%s Linked %s -> %s (%s)"),
+				*GetDebugPrefix(),
+				*Container->GetContainerId().ToString(), *NewLink->LinkedContainerId.ToString(),
+				*Link.LinkSpec.ContainerLinkClass->GetName());
+		}
+	}
+}
+
+void UGameItemContainerComponent::OnRep_Containers(const TArray<UGameItemContainer*>& PreviousContainers)
+{
+	UE_LOG(LogGameItems, VeryVerbose, TEXT("%s [%hs] Containers: %d"),
+		*GetDebugPrefix(), __func__, Containers.Num());
+
+	// find containers that got removed
+	for (UGameItemContainer* PreviousContainer : PreviousContainers)
+	{
+		if (IsValid(PreviousContainer))
+		{
+			if (!Containers.Contains(PreviousContainer))
+			{
+				OnContainerRemoved(PreviousContainer);
+			}
+		}
+	}
+
+	// find containers that got added
+	for (UGameItemContainer* NewContainer : Containers)
+	{
+		if (IsValid(NewContainer))
+		{
+			if (!PreviousContainers.Contains(NewContainer))
+			{
+				OnContainerAdded(NewContainer);
+			}
+		}
+	}
+
+	// try to resolve container links
+	ResolveAllContainerLinks();
+
+	// update container lookup map
+	ContainerMap.Reset();
+	for (const TObjectPtr<UGameItemContainer>& Container : Containers)
+	{
+		if (IsValid(Container))
+		{
+			ContainerMap.Emplace(Container->GetContainerId(), Container);
+		}
+	}
+}
+
+void UGameItemContainerComponent::OnItemAddedToContainer(UGameItem* Item, UGameItemContainer* Container)
+{
+	if (!Container->IsChild())
+	{
+		if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+		{
+			AddReplicatedSubObject(Item);
+		}
+
+		OnItemAddedEvent.Broadcast(Item);
+	}
+}
+
+void UGameItemContainerComponent::OnPostItemRemovedFromContainer(UGameItem* Item, UGameItemContainer* Container)
+{
+	if (!Container->IsChild())
+	{
+		// items should never belong to more than one parent container,
+		// child linked containers should also have cleaned up by now.
+		if (ensure(!ContainsItemInAnyContainer(Item)))
+		{
+			if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+			{
+				RemoveReplicatedSubObject(Item);
+			}
+
+			OnItemRemovedEvent.Broadcast(Item);
+		}
+	}
+}
+
+void UGameItemContainerComponent::OnRuleAdded(UGameItemContainerRule* Rule)
+{
+	if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+	{
+		AddReplicatedSubObject(Rule);
+	}
+
+	// TODO: try to resolve container links? but only on rep?
+	// ResolveAllContainerLinks();
+}
+
+void UGameItemContainerComponent::OnRuleRemoved(UGameItemContainerRule* Rule)
+{
+	if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+	{
+		RemoveReplicatedSubObject(Rule);
+	}
+}
+
+FString UGameItemContainerComponent::GetDebugPrefix() const
+{
+	return FString::Printf(TEXT("%s[%s]"), *UGameItemStatics::GetNetDebugPrefix(this), *GetReadableName());
+}
+
+bool FGameItemContainerComponentSaveProxy::Serialize(FArchive& Ar)
+{
+	if (Ar.IsSaveGame())
+	{
+#if DO_ENSURE
+		if (bEnsureValid ? ensure(Component != nullptr) : Component != nullptr)
+#else
+		if (Component != nullptr)
+#endif
+		{
+			Component->Serialize(Ar);
+		}
+		return true;
+	}
+	return false;
+}
+
+bool FGameItemContainerComponentSaveProxy::Identical(const FGameItemContainerComponentSaveProxy* Other, uint32 PortFlags) const
+{
+	if (Other == nullptr)
+	{
+		return false;
+	}
+	if (!Component)
+	{
+		// nothing to do
+		return true;
+	}
+	return false;
+}
+
+void FGameItemContainerComponentSaveProxy::operator=(UGameItemContainerComponent* InComponent)
+{
+	Component = InComponent;
 }

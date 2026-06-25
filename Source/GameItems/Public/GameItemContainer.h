@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameItem.h"
 #include "GameItemTypes.h"
+#include "Engine/EngineTypes.h"
 #include "UObject/Object.h"
 #include "GameItemContainer.generated.h"
 
@@ -70,29 +71,34 @@ class GAMEITEMS_API UGameItemContainer : public UObject
 public:
 	UGameItemContainer(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
+protected:
 	/** The unique tag identifying this container amongst others. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameItemContainer")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Replicated, Category = "GameItemContainer")
 	FGameplayTag ContainerId;
 
+public:
+	void SetContainerId(FGameplayTag NewContainerId);
+
+	FORCEINLINE FGameplayTag GetContainerId() const { return ContainerId; }
+
 	/** The user-facing display name of this container. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GameItemContainer")
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Replicated, Category = "GameItemContainer")
 	FText DisplayName;
 
 	/** Set the definition for this container. Cannot be changed once set. */
-	UFUNCTION(BlueprintCallable)
 	void SetContainerDef(TSubclassOf<UGameItemContainerDef> NewContainerDef);
 
 	/** Set the item collection that this container belongs to. */
-	UFUNCTION(BlueprintCallable)
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
 	void SetCollection(TScriptInterface<IGameItemCollectionInterface> NewCollection);
 
 	/** Set the item collection that this container belongs to. */
-	UFUNCTION(BlueprintPure)
+	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
 	virtual TScriptInterface<IGameItemCollectionInterface> GetCollection() const { return Collection; }
 
 	/** Return the CDO of the container definition. */
-	UFUNCTION(BlueprintPure, DisplayName = "GetContainerDef")
-	FORCEINLINE const UGameItemContainerDef* GetContainerDefCDO() const;
+	UFUNCTION(BlueprintPure, DisplayName = "GetContainerDef", Category = "GameItemContainer")
+	const UGameItemContainerDef* GetContainerDefCDO() const;
 
 	/** Get all tags that this container has. */
 	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
@@ -108,46 +114,66 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure = false, Meta = (AdvancedDisplay = "2"), Category = "GameItemContainer")
 	FGameItemContainerAddPlan CheckAddItem(UGameItem* Item, int32 TargetSlot = -1, UGameItemContainer* OldContainer = nullptr) const;
 
+public:
 	/**
 	 * Add an item to this container. This does not remove the item from any existing containers.
 	 * @param Item The item to add.
 	 * @param TargetSlot The slot where the item should be added, or the first available if -1.
+	 * @param bWarn Warn if the item could not be added successfully.
 	 * @return The item or items (if split into multiple stacks) that were added.
 	 */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
-	TArray<UGameItem*> AddItem(UGameItem* Item, int32 TargetSlot = -1);
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	void AddItem(UGameItem* Item, int32 TargetSlot = -1, bool bWarn = true);
 
 	/** Add multiple items to this container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
-	TArray<UGameItem*> AddItems(TArray<UGameItem*> Items, int32 TargetSlot = -1);
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	void AddItems(TArray<UGameItem*> Items, int32 TargetSlot = -1);
 
 	/** Remove an item from this container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
 	void RemoveItem(UGameItem* Item);
 
 	/** Remove multiple items from this container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
 	void RemoveItems(TArray<UGameItem*> Items);
 
 	/** Remove an item from a specific slot of this container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
-	UGameItem* RemoveItemAt(int32 Slot);
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	void RemoveItemAt(int32 Slot);
+
+	/**
+	 * Remove a quantity of an item by definition. Subtracts from each stack in order, and removes items when empty.
+	 * Returns the number of items removed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	void RemoveItemsByDef(TSubclassOf<UGameItemDef> ItemDef, int32 Count = 1);
 
 	/** Remove all items from this container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
 	void RemoveAllItems();
 
-	/** Swap the location of two items in the container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	/**
+	 * Swap the location of two slots in the container.
+	 * This should be used to move an item to a new empty slot as well.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer", meta = (Keywords = "Move"))
 	void SwapItems(int32 SlotA, int32 SlotB);
 
 	/** Stack two items in the container. */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
 	void StackItems(int32 FromSlot, int32 ToSlot, bool bAllowPartial = true);
 
-	/** Return all items in the container. */
+public:
+	/** Return all items in the container as a map indexed by slot. */
 	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
-	TArray<UGameItem*> GetAllItems() const;
+	TMap<int32, UGameItem*> GetAllItems() const;
+
+	/**
+	 * Return all items in the container, in an array matching slots (which may include null entries).
+	 * Slower than GetAllItems but useful for UI, etc.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
+	TArray<UGameItem*> GetAllItemsAsSlotArray() const;
 
 	/** Return the item in a specific slot of this container. */
 	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
@@ -160,6 +186,18 @@ public:
 	/** Return the first stack of an item by definition. */
 	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
 	UGameItem* FindFirstItemByDef(TSubclassOf<UGameItemDef> ItemDef) const;
+
+	/** Return all items by definition. */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
+	TArray<UGameItem*> FindItemsByDef(TSubclassOf<UGameItemDef> ItemDef) const;
+
+	/** Return the first item matching tag requirements. */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
+	UGameItem* FindFirstItemByTag(FGameplayTagContainer RequireTags, FGameplayTagContainer IgnoreTags) const;
+
+	/** Return all items matching tag requirements. */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer", meta = (GameplayTagFilter = "GameItemTagsCategory"))
+	TArray<UGameItem*> FindItemsByTag(FGameplayTagContainer RequireTags, FGameplayTagContainer IgnoreTags) const;
 
 	/**
 	 * Return the first stack of an item that matches another item.
@@ -178,6 +216,13 @@ public:
 	/** Return the slot of an item in this container, or -1 if not in the container. */
 	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
 	int32 GetItemSlot(const UGameItem* Item) const;
+
+	/**
+	 * Set the item in a slot by removing any existing item first, then adding.
+	 * Doesn't verify first if the item can be added before removing.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "GameItemContainer")
+	void SetItemAt(UGameItem* Item, int32 Slot);
 
 	/** Return true if an item exists in the container. */
 	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
@@ -248,6 +293,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
 	virtual bool CanContainItem(const UGameItem* Item) const;
 
+	/** Return true if the container is ever allowed to contain an item by definition. */
+	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
+	virtual bool CanContainItemByDef(TSubclassOf<UGameItemDef> ItemDef) const;
+
 	/** Return the maximum total number of an item allowed in this container (for all stacks combined). */
 	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
 	virtual int32 GetItemMaxCount(const UGameItem* Item) const;
@@ -269,17 +318,17 @@ public:
 	virtual int32 GetRemainingCollectionSpaceForItem(const UGameItem* Item) const;
 
 	/**
-	 * Add the default items defined for this container.
+	 * Create and add the default items defined for this container.
 	 * @param bForce If true, add the items even if they had previously been added.
 	 */
-	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-	virtual void AddDefaultItems(bool bForce = false);
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	virtual void CreateDefaultItems(bool bForce = false);
 
 	/** Return all rules applied to this container. */
 	const TArray<UGameItemContainerRule*>& GetRules() const { return Rules; }
 
 	/** Return a rule by class. */
-	UFUNCTION(BlueprintCallable, BlueprintPure = false, Meta = (DeterminesOutputType = "RuleClass"))
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Meta = (DeterminesOutputType = "RuleClass"), Category = "GameItemContainer")
 	UGameItemContainerRule* GetRule(TSubclassOf<UGameItemContainerRule> RuleClass) const;
 
 	template <class T>
@@ -306,11 +355,16 @@ public:
 	 */
 	int32 RemoveRule(TSubclassOf<UGameItemContainerRule> RuleClass);
 
+	FString GetRulesDebugString() const;
+
 	/** Return true if the container is a child of another container, and cannot store its own items. */
 	virtual bool IsChild() const;
 
 	/** Return true if a container is a parent of this container. */
 	virtual bool HasParent(UGameItemContainer* ParentContainer) const;
+
+	/** Return the parent of this container. If multiple parents exist (unusual), returns the first. */
+	virtual UGameItemContainer* GetParent() const;
 
 	/** Return all children containers. */
 	virtual TArray<UGameItemContainer*> GetChildren() const;
@@ -322,45 +376,59 @@ public:
 	void UnregisterChild(UGameItemContainer* ChildContainer);
 
 	/** Return the priority of this container when selecting the 'best' container for auto-slotting an item. */
-	UFUNCTION(BlueprintPure)
-	virtual int32 GetAutoSlotPriorityForItem(UGameItem* Item, FGameplayTagContainer ContextTags) const;
+	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
+	virtual int32 GetAutoSlotPriorityForItem(const UGameItem* Item, FGameplayTagContainer ContextTags) const;
 
 	/** Return true if this container has rules allowing it to auto-slot an item. */
-	UFUNCTION(BlueprintPure)
+	UFUNCTION(BlueprintPure, Category = "GameItemContainer")
 	virtual bool CanAutoSlot(UGameItem* Item, FGameplayTagContainer ContextTags) const;
 
 	/**
 	 * Add an item to this container, automatically selecting the best slot for it based on rules,
 	 * and potentially replacing existing items, or cancelling if desired.
 	 */
-	UFUNCTION(BlueprintCallable)
-	virtual TArray<UGameItem*> TryAutoSlot(UGameItem* Item, FGameplayTagContainer ContextTags);
+	UFUNCTION(BlueprintCallable, Category = "GameItemContainer")
+	virtual void TryAutoSlot(UGameItem* Item, FGameplayTagContainer ContextTags);
 
 	/** Return the child container with the highest auto-slot priority for an item. */
-	UFUNCTION(BlueprintCallable, BlueprintPure = false)
-	UGameItemContainer* FindAutoSlotChildContainerForItem(UGameItem* Item, FGameplayTagContainer ContextTags) const;
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItemContainer")
+	UGameItemContainer* FindAutoSlotChildContainerForItem(const UGameItem* Item, FGameplayTagContainer ContextTags,
+	                                                      const FGameplayTagQuery ContainerQuery = FGameplayTagQuery()) const;
 
 	/** Return the owning actor of this container. */
 	virtual AActor* GetOwner() const;
 
 	virtual UWorld* GetWorld() const override;
 
+	/** Return the object to use as the outer for new game items. */
+	virtual UObject* GetItemOuter() const;
+
 	/** Save this container's items and properties to save data. */
 	void CommitSaveData(FGameItemContainerSaveData& ContainerData, TMap<UGameItem*, FGuid>& SavedItems);
 
 	/** Load this container's items and properties from save data. */
-	void LoadSaveData(const FGameItemContainerSaveData& ContainerData, TMap<FGuid, UGameItem*>& LoadedItems);
+	void LoadSaveData(const FGameItemContainerSaveData& ContainerData, bool bPreserveExistingItems, TMap<FGuid, UGameItem*>& LoadedItems);
 
+	/** Return the internal ItemList for debugging. */
+	const FGameItemList& GetInternalItemList() const { return ItemList; }
+
+	FString GetDebugPrefix() const;
+
+public:
 	DECLARE_MULTICAST_DELEGATE_OneParam(FItemAddOrRemoveDelegate, UGameItem* /*Item*/);
 	DECLARE_MULTICAST_DELEGATE_OneParam(FItemSlotChangedDelegate, int32 /*Slot*/);
 	DECLARE_MULTICAST_DELEGATE_TwoParams(FItemSlotsChangedDelegate, int32 /*StartSlot*/, int32 /*EndSlot*/);
 	DECLARE_MULTICAST_DELEGATE_TwoParams(FNumSlotsChangedDelegate, int32 /*NewNumSlots*/, int32 /*OldNumSlots*/);
+	DECLARE_MULTICAST_DELEGATE_OneParam(FRuleAddOrRemoveDelegate, UGameItemContainerRule* /*Rule*/);
 
 	/** Called when a new item is added. */
 	FItemAddOrRemoveDelegate OnItemAddedEvent;
 
 	/** Called when an item is removed. */
 	FItemAddOrRemoveDelegate OnItemRemovedEvent;
+
+	/** Called when an item is removed, and after other delegates. */
+	FItemAddOrRemoveDelegate OnPostItemRemovedEvent;
 
 	/** Called the item in a slot is changed. */
 	FItemSlotChangedDelegate OnItemSlotChangedEvent;
@@ -371,27 +439,80 @@ public:
 	/** Called when the total number of slots has changed. */
 	FNumSlotsChangedDelegate OnNumSlotsChangedEvent;
 
+	/** Called when a new rule is added. */
+	FRuleAddOrRemoveDelegate OnRuleAddedEvent;
+
+	/** Called when a rule is removed. */
+	FRuleAddOrRemoveDelegate OnRuleRemovedEvent;
+
+public:
+	virtual EGameItemContainerNetExecutionPolicy GetNetExecutionPolicy() const;
+
+	/** Return true if the items in this container are replicated (Policy != LocalOnly, and owner is a replicated actor). */
+	bool IsReplicated() const;
+
+	/**
+	 * Return true if the items in this container exist and are managed on the server,
+	 * whether the container is replicated or not.
+	 */
+	bool ItemsExistOnServer() const;
+
+	/** Return the actor that should be used for network role / authority checks. */
+	virtual AActor* GetNetworkOwner() const;
+
+	/** Return true if the network owner is locally controlled. */
+	virtual bool IsLocallyControlled() const;
+
+	/** Retrieve whether the network owner has authority and/or is locally controlled. */
+	virtual void GetAuthorityAndLocalControl(bool& bOutAuthority, bool& bOutLocallyControlled) const;
+
+	/** Return whether we should execute a function via Server rpc and/or locally. */
+	virtual void GetNetExecutionPlan(bool& bOutExecuteServer, bool& bOutExecuteLocal) const;
+
+	/** Return true if this container has authority to save and load items. */
+	virtual bool HasSaveAndLoadAuthority() const;
+
+	/** Accept or reject predicted changes for a key. */
+	virtual void ConfirmPredictionKey(const FGameItemsPredictionKey& PredictionKey, bool bAccepted);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAddItem(UGameItem* Item, int32 TargetSlot = -1);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAddItems(const TArray<UGameItem*>& Items, int32 TargetSlot = -1);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRemoveItem(UGameItem* Item);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRemoveItems(const TArray<UGameItem*>& Items);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRemoveItemAt(int32 Slot);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRemoveItemsByDef(TSubclassOf<UGameItemDef> ItemDef, int32 Count = 1);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRemoveAllItems();
+
+	UFUNCTION(Server, Reliable)
+	void ServerSwapItems(int32 SlotA, int32 SlotB);
+
+	UFUNCTION(Server, Reliable)
+	void ServerStackItems(int32 FromSlot, int32 ToSlot, bool bAllowPartial = true);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetItemAt(UGameItem* Item, int32 Slot);
+
+	UFUNCTION(Server, Reliable)
+	void ServerCreateDefaultItems(bool bForce = false);
+	
 protected:
-	/** The settings for this container. */
-	UPROPERTY(Transient, BlueprintReadOnly, DisplayName = "ContainerDefClass", Meta = (AllowPrivateAccess = true), Category = "GameItemContainer")
-	TSubclassOf<UGameItemContainerDef> ContainerDef;
+	static bool IsLocallyControlledActor(const AActor* InActor);
 
-	/** The active rules applied to this container. */
-	UPROPERTY(Transient, BlueprintReadOnly, Category = "GameItemContainer")
-	TArray<TObjectPtr<UGameItemContainerRule>> Rules;
-
-	/** All child containers, which must register themself via Register/UnregisterChild */
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<UGameItemContainer>> ChildContainers;
-
-	/** The collection that this container belongs to. */
-	UPROPERTY()
-	TScriptInterface<IGameItemCollectionInterface> Collection;
-
-	/** Have the default items already been added to this container? */
-	bool bHasDefaultItems;
-
-	/** Used to track slot changes and broadcast after several operations are completed. */
+public:
+	/** Groups multiple slot changes during the scope, and broadcasts them all when completed. */
 	struct FScopedSlotChanges
 	{
 		FScopedSlotChanges(UGameItemContainer* InContainer)
@@ -412,17 +533,38 @@ protected:
 		UGameItemContainer* Container;
 	};
 
+protected:
+	/** The settings for this container. */
+	UPROPERTY(Transient, BlueprintReadOnly, Replicated, DisplayName = "ContainerDefClass", Meta = (AllowPrivateAccess = true), Category = "GameItemContainer")
+	TSubclassOf<UGameItemContainerDef> ContainerDef;
+
+	/** The active rules applied to this container. */
+	UPROPERTY(Transient, BlueprintReadOnly, ReplicatedUsing = OnRep_Rules, Category = "GameItemContainer")
+	TArray<TObjectPtr<UGameItemContainerRule>> Rules;
+
+	UFUNCTION()
+	void OnRep_Rules(const TArray<UGameItemContainerRule*>& PreviousRules);
+
+	/** All child containers, which must register themselves via Register/UnregisterChild */
+	UPROPERTY(Transient, Replicated)
+	TArray<TObjectPtr<UGameItemContainer>> ChildContainers;
+
+	/** The collection that this container belongs to. */
+	UPROPERTY()
+	TScriptInterface<IGameItemCollectionInterface> Collection;
+
+	/** Have the default items already been added to this container? */
+	UPROPERTY(Transient, Replicated)
+	bool bHasDefaultItems = false;
+
 	/** Number of open change operations. */
-	int32 ActiveChangeOperations;
+	int32 ActiveChangeOperations = 0;
 
 	/** Number of slots in the container before any change operations. */
-	int32 NumSlotsPreChange;
+	int32 NumSlotsPreChange = INDEX_NONE;
 
 	/** Set of slots that were changed during change operations. */
-	TArray<int32> ChangedSlots;
-
-	/** Return the object to use as the outer for new game items. */
-	virtual UObject* GetItemOuter() const;
+	TSet<int32> PendingChangedSlots;
 
 	/**
 	 * Return a plan representing how an item will be added to this container,
@@ -433,6 +575,12 @@ protected:
 
 	virtual void OnItemAdded(UGameItem* Item, int32 Slot);
 	virtual void OnItemRemoved(UGameItem* Item, int32 Slot);
+
+	virtual void OnRuleAdded(UGameItemContainerRule* Rule);
+	virtual void OnRuleRemoved(UGameItemContainerRule* Rule);
+
+	/** Called when the replicated item list has changed. */
+	virtual void OnPostReplicatedChanges(const TArray<FGameItemList::FChange>& Changes);
 
 	/** Start a slot change operation, gathering slot changes to broadcast later. */
 	void BeginSlotChanges();
@@ -446,15 +594,28 @@ protected:
 
 	virtual void BroadcastSlotChanges();
 
-	/** Called when the underlying list has changed. */
-	virtual void OnListChanged(FGameItemListEntry& Entry, int32 NewCount, int32 OldCount);
+public:
+	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual bool IsSupportedForNetworking() const override;
+	virtual int32 GetFunctionCallspace(UFunction* Function, FFrame* Stack) override;
+	virtual bool CallRemoteFunction(UFunction* Function, void* Parms, struct FOutParmRec* OutParms, FFrame* Stack) override;
+	virtual void RegisterReplicationFragments(UE::Net::FFragmentRegistrationContext& Context, UE::Net::EFragmentRegistrationFlags RegistrationFlags) override;
 
-private:
+protected:
 	/** The replicated item list struct. */
-	UPROPERTY(Replicated)
+	UPROPERTY(Transient, Replicated)
 	FGameItemList ItemList;
 
 public:
+	/** Items that are pending being added to this container. */
+	UPROPERTY(Transient)
+	TArray<FGameItemPendingAdd> PendingAddExistingItems;
+
+public:
+	/** Return a readable name for this container object for debugging. */
+	UFUNCTION(BlueprintPure, Category = "GameItems")
+	virtual FString GetReadableName() const;
+
 	/** Display debug info about this component. */
 	virtual void DisplayDebug(class UCanvas* Canvas, const class FDebugDisplayInfo& DebugDisplay, float& YL, float& YPos) const;
 };

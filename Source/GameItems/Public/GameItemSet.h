@@ -6,8 +6,10 @@
 #include "GameItemTypes.h"
 #include "Engine/DataAsset.h"
 #include "UObject/ObjectSaveContext.h"
+#include "UObject/ScriptInterface.h"
 #include "GameItemSet.generated.h"
 
+class IGameItemContainerInterface;
 class UGameItemFragment;
 class UGameItemSet;
 
@@ -31,15 +33,15 @@ public:
 	TArray<FDirectoryPath> SearchDirectories;
 
 	/** Items must have all of these tags to be included. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagContainer RequireTags;
 
 	/** Items must have none of these tags to be included. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagContainer IgnoreTags;
 
 	/** Items must match this tag query to be included. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Auto Fill", meta = (GameplayTagFilter="GameItemTagsCategory"))
 	FGameplayTagQuery TagQuery;
 
 	/** Items must have this item fragment to be included. */
@@ -47,7 +49,7 @@ public:
 	TArray<TSubclassOf<UGameItemFragment>> RequireFragments;
 
 	/** Fill an item set with items. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false, Category = "GameItems")
 	void FillSet(UGameItemSet* ItemSet) const;
 
 	/** Return true if an item definition should be included in the set. */
@@ -77,8 +79,12 @@ public:
 	TArray<FGameItemDefStack> Items;
 
 	/** Add all items in this set to a container. */
-	UFUNCTION(BlueprintCallable, Category = "GameItems")
-	virtual void AddToContainer(UGameItemContainer* Container) const;
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	virtual void AddToContainer(UGameItemContainer* Container, bool bWarn = true) const;
+
+	/** Add each item in the set to a container, determined by finding the default container to use for each item. */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	virtual void AddToDefaultContainers(TScriptInterface<IGameItemContainerInterface> ContainerInterface) const;
 
 #if WITH_EDITOR
 

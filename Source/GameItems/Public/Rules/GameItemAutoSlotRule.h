@@ -25,24 +25,31 @@ class GAMEITEMS_API UGameItemAutoSlotRule : public UGameItemContainerRule
 
 public:
 	/** Return the priority of this container when selecting the 'best' container for auto-slotting an item. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
-	int32 GetAutoSlotPriorityForItem(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	int32 GetAutoSlotPriorityForItem(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
 
 	/** Return true if this rule can handle auto-slotting an item. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
-	bool CanAutoSlot(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	bool CanAutoSlot(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
 
-	/**
-	 * Try auto-slotting an item.
-	 * @return Trie of the auto-slotting was successful. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
-	bool TryAutoSlot(UGameItem* Item, const FGameplayTagContainer& ContextTags, TArray<UGameItem*>& OutItems) const;
+	/** Try auto-slotting an item. */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	void TryAutoSlot(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
 
 	/** Return the best slot to use for auto-slotting an item. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
-	int32 GetBestSlotForItem(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	int32 GetBestSlotForItem(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
 
 	/** Return true if an item should replace an existing item in the container. */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false)
-	bool ShouldReplaceItem(UGameItem* NewItem, UGameItem* ExistingItem, const FGameplayTagContainer& ContextTags) const;
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, BlueprintPure = false, Category = "GameItems")
+	bool ShouldReplaceItem(const UGameItem* NewItem, const UGameItem* ExistingItem, const FGameplayTagContainer& ContextTags) const;
+
+public:
+	UFUNCTION(Server, Reliable)
+	virtual void ServerTryAutoSlot(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
+
+protected:
+	/** Implementation of the auto-slotting logic. */
+	UFUNCTION(BlueprintNativeEvent, Category = "GameItems", DisplayName = "Try Auto Slot")
+	void TryAutoSlotInternal(UGameItem* Item, const FGameplayTagContainer& ContextTags) const;
 };

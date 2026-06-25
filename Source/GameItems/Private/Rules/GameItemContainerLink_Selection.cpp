@@ -4,13 +4,36 @@
 #include "Rules/GameItemContainerLink_Selection.h"
 
 #include "GameItemContainer.h"
+#include "Net/UnrealNetwork.h"
 
 
 UGameItemContainerLink_Selection::UGameItemContainerLink_Selection()
-	: TargetSlot(0),
-	  bAllowSelectingEmptySlots(false),
-	  SelectedSlot(0)
+	: TargetSlot(0)
+	, bAllowSelectingEmptySlots(false)
+	, SelectedSlot(0)
 {
+}
+
+void UGameItemContainerLink_Selection::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	FDoRepLifetimeParams Params;
+	Params.bIsPushBased = true;
+
+	DOREPLIFETIME_WITH_PARAMS_FAST(UGameItemContainerLink_Selection, TargetSlot, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(UGameItemContainerLink_Selection, bAllowSelectingEmptySlots, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(UGameItemContainerLink_Selection, SelectedSlot, Params);
+}
+
+FString UGameItemContainerLink_Selection::GetDebugString() const
+{
+	return FString::Printf(TEXT("%s(Sel:%d)"), *Super::GetDebugString(), SelectedSlot);
+}
+
+void UGameItemContainerLink_Selection::OnRep_SelectedSlot()
+{
+	UpdateContainerForSelection();
 }
 
 void UGameItemContainerLink_Selection::OnLinkedContainerChanged(UGameItemContainer* NewContainer, UGameItemContainer* OldContainer)
@@ -35,8 +58,26 @@ void UGameItemContainerLink_Selection::SetSelectedSlot(int32 NewSlot)
 	if (SelectedSlot != NewSlot)
 	{
 		SelectedSlot = NewSlot;
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, SelectedSlot, this);
 
 		UpdateContainerForSelection();
+	}
+}
+
+void UGameItemContainerLink_Selection::ClearSelectedSlot()
+{
+	SetSelectedSlot(INDEX_NONE);
+}
+
+void UGameItemContainerLink_Selection::SetSelectedItem(UGameItem* Item)
+{
+	if (Item && LinkedContainer)
+	{
+		const int32 Slot = LinkedContainer->GetItemSlot(Item);
+		if (Slot != INDEX_NONE)
+		{
+			SetSelectedSlot(Slot);
+		}
 	}
 }
 
@@ -64,6 +105,7 @@ void UGameItemContainerLink_Selection::SelectPrevSlot(bool bLoop)
 	}
 }
 
+
 void UGameItemContainerLink_Selection::SelectNextItem(bool bLoop)
 {
 	const int32 NewSlot = FindValidItemSlot(1, bLoop);
@@ -72,6 +114,7 @@ void UGameItemContainerLink_Selection::SelectNextItem(bool bLoop)
 		SetSelectedSlot(NewSlot);
 	}
 }
+
 
 void UGameItemContainerLink_Selection::SelectPrevItem(bool bLoop)
 {
@@ -149,12 +192,17 @@ int32 UGameItemContainerLink_Selection::ClampSlot(int32 Slot, bool bLoop) const
 
 void UGameItemContainerLink_Selection::OnLinkedSlotChanged(int32 Slot)
 {
+	if (!GetContainer()->IsLocallyControlled())
+	{
+		return;
+	}
+
 	if (Slot == SelectedSlot && LinkedContainer)
 	{
 		if (LinkedContainer->IsSlotEmpty(SelectedSlot) && !bAllowSelectingEmptySlots)
 		{
 			// clear the item now in case no valid item is found, and the selected slot doesn't change
-			Container->RemoveItemAt(TargetSlot);
+			GetContainer()->RemoveItemAt(TargetSlot);
 			SelectNextItem();
 			return;
 		}
@@ -165,7 +213,12 @@ void UGameItemContainerLink_Selection::OnLinkedSlotChanged(int32 Slot)
 
 void UGameItemContainerLink_Selection::OnLinkedItemAdded(UGameItem* GameItem)
 {
-	if (!bAllowSelectingEmptySlots && Container->IsSlotEmpty(TargetSlot))
+	if (!GetContainer()->IsLocallyControlled())
+	{
+		return;
+	}
+
+	if (!bAllowSelectingEmptySlots && GetContainer()->IsSlotEmpty(TargetSlot))
 	{
 		// try to select the new item
 		SelectNextItem(true);
@@ -179,9 +232,14 @@ void UGameItemContainerLink_Selection::UpdateContainerForSelection()
 		return;
 	}
 
+	UGameItemContainer* Container = GetContainer();
+	check(Container);
+
 	UGameItem* SelectedItem = LinkedContainer->GetItemAt(SelectedSlot);
 	if (Container->GetItemAt(TargetSlot) != SelectedItem)
 	{
+		UGameItemContainer::FScopedSlotChanges ScopedSlotChanges(Container);
+
 		Container->RemoveItemAt(TargetSlot);
 
 		if (SelectedItem)

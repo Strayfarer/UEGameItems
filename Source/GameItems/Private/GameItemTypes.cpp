@@ -3,10 +3,14 @@
 #include "GameItemTypes.h"
 
 #include "GameItem.h"
+#include "GameItemContainerDef.h"
 #include "GameItemDef.h"
 #include "GameItemsModule.h"
+#include "GameFramework/Actor.h"
+#include "Rules/GameItemContainerLink.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+#include "UObject/Stack.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(GameItemTypes)
 
@@ -23,7 +27,7 @@ int32 FGameItemCountLimit::GetMaxCount(int32 Default) const
 // FGameItemTagStack
 // -----------------
 
-FString FGameItemTagStack::ToDebugString() const
+FString FGameItemTagStack::GetDebugString() const
 {
 	return FString::Printf(TEXT("%sx%d"), *Tag.ToString(), Count);
 }
@@ -32,72 +36,40 @@ FString FGameItemTagStack::ToDebugString() const
 // FGameItemTagStackContainer
 // --------------------------
 
-void FGameItemTagStackContainer::AddStack(FGameplayTag Tag, int32 DeltaCount)
+bool FGameItemTagStackContainer::SetStackCount(const FGameplayTag& Tag, int32 NewCount)
 {
 	if (!Tag.IsValid())
 	{
 		FFrame::KismetExecutionMessage(TEXT("An invalid tag was passed to AddStack"), ELogVerbosity::Warning);
-		return;
-	}
-
-	if (DeltaCount <= 0)
-	{
-		// nothing to add
-		return;
+		return false;
 	}
 
 	for (FGameItemTagStack& Stack : Stacks)
 	{
 		if (Stack.Tag == Tag)
 		{
-			Stack.Count += DeltaCount;
+			if (Stack.Count == NewCount)
+			{
+				// no change
+				return false;
+			}
+
+			Stack.Count = NewCount;
 			StackCountMap[Tag] = Stack.Count;
 			MarkItemDirty(Stack);
-			return;
+			return true;
 		}
 	}
 
-	FGameItemTagStack& NewStack = Stacks.Emplace_GetRef(Tag, DeltaCount);
+	// allow setting to 0 (and triggering change events),
+	// so that the presence of the tag can be found
+
+	FGameItemTagStack& NewStack = Stacks.Emplace_GetRef(Tag, NewCount);
 	MarkItemDirty(NewStack);
-	StackCountMap.Add(Tag, DeltaCount);
+	StackCountMap.Add(Tag, NewCount);
+	return true;
 }
 
-void FGameItemTagStackContainer::RemoveStack(FGameplayTag Tag, int32 DeltaCount)
-{
-	if (!Tag.IsValid())
-	{
-		FFrame::KismetExecutionMessage(TEXT("An invalid tag was passed to RemoveStack"), ELogVerbosity::Warning);
-		return;
-	}
-
-	if (DeltaCount <= 0)
-	{
-		return;
-	}
-
-	for (auto It = Stacks.CreateIterator(); It; ++It)
-	{
-		FGameItemTagStack& Stack = *It;
-		if (Stack.Tag == Tag)
-		{
-			if (Stack.Count <= DeltaCount)
-			{
-				// remove the tag entirely
-				It.RemoveCurrent();
-				StackCountMap.Remove(Tag);
-				MarkArrayDirty();
-			}
-			else
-			{
-				// decrease the stack count
-				Stack.Count -= DeltaCount;
-				StackCountMap[Tag] = Stack.Count;
-				MarkItemDirty(Stack);
-			}
-			return;
-		}
-	}
-}
 
 void FGameItemTagStackContainer::PreReplicatedRemove(const TArrayView<int32> RemovedIndices, int32 FinalSize)
 {
@@ -144,7 +116,7 @@ FString FGameItemTagStackContainer::ToDebugString() const
 	TArray<FString> StackStrings;
 	for (const FGameItemTagStack& Stack : Stacks)
 	{
-		StackStrings.Add(Stack.ToDebugString());
+		StackStrings.Add(Stack.GetDebugString());
 	}
 	return FString::Join(StackStrings, TEXT(", "));
 }
@@ -153,82 +125,89 @@ FString FGameItemTagStackContainer::ToDebugString() const
 // FGameItemListEntry
 // ------------------
 
-FString FGameItemListEntry::ToDebugString() const
+FString FGameItemListEntry::GetDebugString() const
 {
-	return Item ? Item->ToDebugString() : TEXT("(none)");
+	return FString::Printf(TEXT("[Slot %d]: %s"), Slot, Item ? *Item->GetDebugString() : TEXT("(invalid)"));
+}
+
+
+// FGameItemList::FChange
+// ----------------------
+
+FString FGameItemList::FChange::GetDebugString() const
+{
+	return FString::Printf(TEXT("%s: [Slot %d -> %d]: %s"),
+	                       bIsRemoved ? TEXT("Removed") : TEXT("Added/Changed"),
+	                       LastKnownSlot, Slot,
+	                       Item ? *Item->GetDebugString() : TEXT("(invalid)"));
 }
 
 
 // FGameItemList
 // -------------
 
-void FGameItemList::PreReplicatedRemove(const TArrayView<int32> RemovedIndices, int32 FinalSize)
+void FGameItemList::PreReplicatedRemove(const TArrayView<int32>& RemovedIndices, int32 FinalSize)
 {
+	// called when any item is removed from a slot,
+	// (even if replaced by another item, since that will be a new entry)
 	for (const int32 Idx : RemovedIndices)
 	{
-		// FGameItemListEntry& Entry = Entries[Idx];
-		// OnListChangedEvent.Broadcast(Entry, 0, Entry.Count);
-		// Entry.LastKnownCount = 0;
+		PendingChanges.Emplace(Entries[Idx], true);
+		Entries[Idx].LastKnownSlot = Entries[Idx].Slot;
 	}
 }
 
-void FGameItemList::PostReplicatedAdd(const TArrayView<int32> AddedIndices, int32 FinalSize)
+void FGameItemList::PostReplicatedAdd(const TArrayView<int32>& AddedIndices, int32 FinalSize)
 {
 	for (const int32 Idx : AddedIndices)
 	{
-		// FGameItemListEntry& Entry = Entries[Idx];
-		// OnListChangedEvent.Broadcast(Entry, Entry.Count, 0);
-		// Entry.LastKnownCount = Entry.Count;
+		// Entry.Item is often null here (before UpdateUnmappedObjects is called),
+		// let the caller ignore it if so
+		PendingChanges.Emplace(Entries[Idx], false);
+		Entries[Idx].LastKnownSlot = Entries[Idx].Slot;
 	}
 }
 
-void FGameItemList::PostReplicatedChange(const TArrayView<int32> ChangedIndices, int32 FinalSize)
+void FGameItemList::PostReplicatedChange(const TArrayView<int32>& ChangedIndices, int32 FinalSize)
 {
 	for (const int32 Idx : ChangedIndices)
 	{
-		// FGameItemListEntry& Entry = Entries[Idx];
-		// OnListChangedEvent.Broadcast(Entry, Entry.LastKnownCount, Entry.Count);
-		// Entry.LastKnownCount = Entry.Count;
+		PendingChanges.Emplace(Entries[Idx], false);
+		Entries[Idx].LastKnownSlot = Entries[Idx].Slot;
 	}
 }
 
-void FGameItemList::AddEntry(UGameItem* Item)
+void FGameItemList::PostReplicatedReceive(const FPostReplicatedReceiveParameters& Parameters)
 {
-	check(Item != nullptr);
-
-	FGameItemListEntry& NewEntry = Entries.AddDefaulted_GetRef();
-	NewEntry.Item = Item;
-
-	MarkItemDirty(NewEntry);
+	if (!PendingChanges.IsEmpty())
+	{
+		OnPostReplicateChangesEvent.Broadcast(PendingChanges);
+		PendingChanges.Empty();
+	}
 }
 
-void FGameItemList::AddEntryAt(UGameItem* Item, int32 Index)
+void FGameItemList::PostSerialize(const FArchive& Ar)
+{
+	if (Ar.IsLoading())
+	{
+		// TODO: cache slot -> entry lookup map for fast access
+	}
+}
+
+void FGameItemList::AddEntryForSlot(UGameItem* Item, int32 Slot)
 {
 	check(Item != nullptr);
-	check(Index >= 0);
+	check(Slot >= 0);
 
-	if (Index == Entries.Num())
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	// ensure slot is new
+	if (!ensureAlwaysMsgf(!HasItemInSlot(Slot), TEXT("Entry already exists for slot: %d"), Slot))
 	{
-		// adding to the next available index, use the AddDefaulted implementation
-		AddEntry(Item);
 		return;
 	}
+#endif
 
-	if (Entries.IsValidIndex(Index) && Entries[Index].Item != nullptr)
-	{
-		UE_LOG(LogGameItems, Error, TEXT("Cannot add item %s at index %d, an item already exists there."), *Item->ToDebugString(), Index);
-		return;
-	}
-
-	if (Index > Entries.Num())
-	{
-		// expand the list to fit the target index, this may create null entries which is acceptable
-		Entries.SetNum(Index + 1);
-	}
-
-	FGameItemListEntry& NewEntry = Entries[Index];
-	NewEntry.Item = Item;
-
+	FGameItemListEntry& NewEntry = Entries.Emplace_GetRef(Item, Slot);
 	MarkItemDirty(NewEntry);
 }
 
@@ -241,32 +220,69 @@ void FGameItemList::RemoveEntry(UGameItem* Item)
 		FGameItemListEntry& Entry = *EntryIt;
 		if (Entry.Item == Item)
 		{
+			// TODO: try RemoveCurrentSwap, see if it's better/works
 			EntryIt.RemoveCurrent();
 			MarkArrayDirty();
 		}
 	}
 }
 
-UGameItem* FGameItemList::RemoveEntryAt(int32 Index, bool bPreserveIndices)
+UGameItem* FGameItemList::RemoveEntryForSlot(int32 Slot, bool bCollapseSlots)
 {
 	UGameItem* RemovedItem = nullptr;
-	if (Entries.IsValidIndex(Index))
+	for (auto EntryIt = Entries.CreateIterator(); EntryIt; ++EntryIt)
 	{
-		RemovedItem = Entries[Index].Item;
-
-		if (bPreserveIndices)
+		FGameItemListEntry& Entry = *EntryIt;
+		if (Entry.Slot == Slot)
 		{
-			Entries[Index].Item = nullptr;
+			RemovedItem = Entry.Item;
+			EntryIt.RemoveCurrent();
+			MarkArrayDirty();
+			break;
 		}
-		else
-		{
-			Entries.RemoveAt(Index);
-		}
-
-		MarkArrayDirty();
 	}
 
+	// remove gaps if desired, done in a second pass to avoid false positives
+	if (bCollapseSlots)
+	{
+		for (auto EntryIt = Entries.CreateIterator(); EntryIt; ++EntryIt)
+		{
+			FGameItemListEntry& Entry = *EntryIt;
+			if (Entry.Slot > Slot)
+			{
+				// if higher slot, drop down by 1
+				Entry.Slot -= 1;
+				MarkItemDirty(Entry);
+			}
+		}
+	}
 	return RemovedItem;
+}
+
+UGameItem* FGameItemList::GetItemInSlot(int32 Slot) const
+{
+	// TODO: cache
+	for (const FGameItemListEntry& Entry : Entries)
+	{
+		if (Entry.Slot == Slot)
+		{
+			return Entry.Item;
+		}
+	}
+	return nullptr;
+}
+
+bool FGameItemList::HasItemInSlot(int32 Slot) const
+{
+	// TODO: cache
+	for (const FGameItemListEntry& Entry : Entries)
+	{
+		if (Entry.Slot == Slot && ensureAlways(Entry.Item))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void FGameItemList::Reset()
@@ -275,35 +291,81 @@ void FGameItemList::Reset()
 	MarkArrayDirty();
 }
 
-void FGameItemList::SwapEntries(int32 IndexA, int32 IndexB)
+bool FGameItemList::SwapEntries(int32 SlotA, int32 SlotB)
 {
-	check(IndexA >= 0);
-	check(IndexB >= 0);
+	check(SlotA >= 0);
+	check(SlotB >= 0);
 
-	const int32 MaxIndex = FMath::Max(IndexA, IndexB);
-	if (MaxIndex >= Entries.Num() - 1)
+	bool bDidChange = false;
+	for (auto EntryIt = Entries.CreateIterator(); EntryIt; ++EntryIt)
 	{
-		Entries.SetNum(MaxIndex + 1);
+		FGameItemListEntry& Entry = *EntryIt;
+		if (Entry.Slot == SlotA)
+		{
+			Entry.Slot = SlotB;
+			MarkItemDirty(Entry);
+			bDidChange = true;
+		}
+		else if (Entry.Slot == SlotB)
+		{
+			Entry.Slot = SlotA;
+			MarkItemDirty(Entry);
+			bDidChange = true;
+		}
 	}
-
-	Entries.Swap(IndexA, IndexB);
-	MarkArrayDirty();
+	return bDidChange;
 }
 
-void FGameItemList::GetAllItems(TArray<UGameItem*>& OutItems) const
+void FGameItemList::GetAllItems(TMap<int32, UGameItem*>& OutItems) const
 {
-	OutItems.Reset(Entries.Num());
+	OutItems.Reset();
+	OutItems.Reserve(Entries.Num());
 	for (const FGameItemListEntry& Entry : Entries)
 	{
-		OutItems.Add(Entry.Item);
+		ensureAlways(!OutItems.Contains(Entry.Slot));
+		OutItems.Add(Entry.Slot, Entry.Item);
 	}
 }
+
+void FGameItemList::GetAllSlots(TArray<int32>& OutSlots) const
+{
+	OutSlots.Reset();
+	OutSlots.Reserve(Entries.Num());
+	for (const FGameItemListEntry& Entry : Entries)
+	{
+		ensureAlways(!OutSlots.Contains(Entry.Slot));
+		OutSlots.Add(Entry.Slot);
+	}
+	OutSlots.Sort();
+}
+
+
+// FGameItemContainerSpec
+// ----------------------
+
+bool FGameItemContainerSpec::IsValid() const
+{
+	return ContainerDef && ContainerId.IsValid();
+}
+
+
+// FGameItemContainerLinkSpec
+// --------------------------
+
+bool FGameItemContainerLinkSpec::IsValid() const
+{
+	return ContainerLinkClass && LinkedContainerId.IsValid() && !ContainerQuery.IsEmpty();
+}
+
+
+// FGameItemSaveData
+// -----------------
 
 FGameItemSaveData::FGameItemSaveData()
 {
 }
 
-FGameItemSaveData::FGameItemSaveData(UGameItem* InItem)
+FGameItemSaveData::FGameItemSaveData(const UGameItem* InItem)
 	: FGameItemSaveData()
 {
 	if (!InItem)
@@ -316,7 +378,10 @@ FGameItemSaveData::FGameItemSaveData(UGameItem* InItem)
 	FMemoryWriter MemWriter(ByteData);
 	FObjectAndNameAsStringProxyArchive Ar(MemWriter, true);
 	Ar.ArIsSaveGame = true;
-	InItem->Serialize(Ar);
+
+	// we are only saving, never loading, keep const in the arguments to indicate this intent
+	UGameItem* MutableItem = const_cast<UGameItem*>(InItem);
+	MutableItem->Serialize(Ar);
 
 	// create a new guid for this save data
 	Guid = FGuid::NewGuid();
@@ -325,4 +390,69 @@ FGameItemSaveData::FGameItemSaveData(UGameItem* InItem)
 FGameItemSaveData::FGameItemSaveData(const FGuid& InGuid)
 	: Guid(InGuid)
 {
+}
+
+FString FGameItemSaveData::ToString() const
+{
+	return FString::Printf(TEXT("%s (%s)"), *ItemDef.GetAssetName().LeftChop(2), *Guid.ToString(EGuidFormats::DigitsWithHyphens));
+}
+
+
+// FGameItemsPredictionKey
+// -----------------------
+
+void FGameItemsPredictionKey::GenerateNewPredictionKey()
+{
+	static int16 GKey = 1;
+	Id = GKey++;
+	if (GKey <= 0)
+	{
+		GKey = 1;
+	}
+}
+
+
+// FGameItemContainerPair
+// ----------------------
+
+bool FGameItemContainerPair::IsValid() const
+{
+	return From != nullptr && To != nullptr;
+}
+
+
+// FGameItemsPredictionKey
+// -----------------------
+
+FGameItemsPredictionKey FGameItemsPredictionKey::CreateNewClientPredictionKey(const AActor* Owner)
+{
+	FGameItemsPredictionKey NewKey;
+
+	// must be generated on clients, never the authority
+	if (Owner->GetLocalRole() != ROLE_Authority)
+	{
+		NewKey.GenerateNewPredictionKey();
+	}
+
+	return NewKey;
+}
+
+FGameItemsPredictionKey FGameItemsPredictionKey::CreateNewServerInitiatedKey(const AActor* Owner)
+{
+	FGameItemsPredictionKey NewKey;
+
+	// must be generated on server
+	if (Owner->GetLocalRole() == ROLE_Authority)
+	{
+		// don't use same generation as client
+		static int16 GServerKey = 1;
+		NewKey.bIsServerInitiated = true;
+		NewKey.Id = GServerKey++;
+
+		if (GServerKey <= 0)
+		{
+			GServerKey = 1;
+		}
+	}
+	return NewKey;
 }

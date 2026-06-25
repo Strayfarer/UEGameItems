@@ -5,8 +5,9 @@
 
 #include "GameItem.h"
 #include "GameItemContainer.h"
-#include "GameItemDef.h"
+#include "GameItemContainerComponent.h"
 #include "GameItemsModule.h"
+#include "GameItemStatics.h"
 #include "GameItemSubsystem.h"
 #include "WorldConditionContext.h"
 #include "Conditions/GameItemConditionSchema.h"
@@ -21,93 +22,97 @@ UGameItemEquipmentComponent::UGameItemEquipmentComponent(const FObjectInitialize
 {
 }
 
-TArray<UGameEquipment*> UGameItemEquipmentComponent::FindAllEquipmentFromItem(UGameItem* Item) const
+void UGameItemEquipmentComponent::InitializeComponent()
 {
-	return FindAllEquipmentByInstigator(Item);
-}
+	Super::InitializeComponent();
 
-void UGameItemEquipmentComponent::AddItemContainer(UGameItemContainer* ItemContainer)
-{
-	if (!ItemContainer || ItemContainers.Contains(ItemContainer))
+	if (bAutoFindContainerComponent)
 	{
-		return;
-	}
-
-	ItemContainers.Add(ItemContainer);
-
-	ItemContainer->OnItemAddedEvent.AddUObject(this, &UGameItemEquipmentComponent::OnItemAdded);
-	ItemContainer->OnItemRemovedEvent.AddUObject(this, &UGameItemEquipmentComponent::OnItemRemoved);
-
-	for (UGameItem* Item : ItemContainer->GetAllItems())
-	{
-		OnItemAdded(Item);
-	}
-}
-
-void UGameItemEquipmentComponent::RemoveItemContainer(UGameItemContainer* ItemContainer)
-{
-	if (!ItemContainer || !ItemContainers.Contains(ItemContainer))
-	{
-		return;
-	}
-
-	ItemContainers.Remove(ItemContainer);
-
-	ItemContainer->OnItemAddedEvent.RemoveAll(this);
-	ItemContainer->OnItemRemovedEvent.RemoveAll(this);
-
-	for (UGameItem* Item : ItemContainer->GetAllItems())
-	{
-		OnItemRemoved(Item);
-	}
-}
-
-void UGameItemEquipmentComponent::ReapplyAllItemEquipment()
-{
-	RemoveAllEquipment();
-
-	for (TWeakObjectPtr<UGameItemContainer> Container : ItemContainers)
-	{
-		if (Container.IsValid())
+		// find item component from owner
+		const UGameItemSubsystem* ItemSubsystem = UGameItemSubsystem::GetGameItemSubsystem(this);
+		if (UGameItemContainerComponent* ItemsComponent = ItemSubsystem->GetContainerComponentForActor(GetOwner()))
 		{
-			for (UGameItem* Item : Container->GetAllItems())
+			RegisterItemContainerComponent(ItemsComponent);
+		}
+		else
+		{
+			UE_LOG(LogGameItems, Warning,
+			       TEXT("%s Couldn't find item component from owner, disable bAutoFindContainerComponent if you need to register manually"),
+			       *GetDebugPrefix());
+		}
+	}
+}
+
+void UGameItemEquipmentComponent::UninitializeComponent()
+{
+	for (auto& Elem : ItemConditionStates)
+	{
+		const UGameItemConditionSchema* DefaultSchema = GetDefault<UGameItemConditionSchema>();
+		FWorldConditionContextData ContextData(*DefaultSchema);
+
+		FGameItemEquipmentConditionState& ItemCondition = Elem.Value;
+		const FWorldConditionContext Context(ItemCondition.State, ContextData);
+		Context.Deactivate();
+	}
+
+	ItemConditionStates.Empty();
+
+	Super::UninitializeComponent();
+}
+
+void UGameItemEquipmentComponent::RegisterItemContainerComponent(UGameItemContainerComponent* ItemContainerComponent)
+{
+	if (!ItemContainerComponent || RegisteredContainerComponents.Contains(ItemContainerComponent))
+	{
+		return;
+	}
+
+	RegisteredContainerComponents.Add(ItemContainerComponent);
+
+	UE_LOG(LogGameItems, Verbose, TEXT("%s Registered item component: %s"),
+		*GetDebugPrefix(), *ItemContainerComponent->GetReadableName());
+
+	ItemContainerComponent->OnItemAddedEvent.AddUObject(this, &ThisClass::OnItemAdded);
+	ItemContainerComponent->OnItemRemovedEvent.AddUObject(this, &ThisClass::OnItemRemoved);
+
+	// activate any existing items
+	for (const UGameItemContainer* Container : ItemContainerComponent->GetAllItemContainers())
+	{
+		// only add items from parent containers, to avoid duplicate calls
+		if (Container && !Container->IsChild())
+		{
+			for (const auto& Elem : Container->GetAllItems())
 			{
-				if (const UGameItemFragment_Equipment* EquipFrag = GetItemEquipmentFragment(Item))
-				{
-					CheckItemEquipmentCondition(Item, EquipFrag);
-				}
+				OnItemAdded(Elem.Value);
 			}
 		}
 	}
 }
 
-const UGameItemFragment_Equipment* UGameItemEquipmentComponent::GetItemEquipmentFragment(UGameItem* Item) const
+void UGameItemEquipmentComponent::UnregisterItemContainerComponent(UGameItemContainerComponent* ItemContainerComponent)
 {
-	if (Item)
+	if (!ItemContainerComponent || !RegisteredContainerComponents.Contains(ItemContainerComponent))
 	{
-		if (const UGameItemDef* ItemDefCDO = Item->GetItemDefCDO())
-		{
-			const UGameItemFragment_Equipment* EquipFrag = ItemDefCDO->FindFragment<UGameItemFragment_Equipment>();
-			if (EquipFrag && EquipFrag->EquipmentDef)
-			{
-				return EquipFrag;
-			}
-		}
+		return;
 	}
 
-	return nullptr;
-}
+	RegisteredContainerComponents.Remove(ItemContainerComponent);
 
-void UGameItemEquipmentComponent::BeginPlay()
-{
-	Super::BeginPlay();
+	UE_LOG(LogGameItems, Verbose, TEXT("%s Unregistered item component: %s"),
+		*GetDebugPrefix(), *ItemContainerComponent->GetReadableName());
 
-	const UGameItemSubsystem* ItemSubsystem = UGameItemSubsystem::GetGameItemSubsystem(this);
-	for (const FGameplayTag ContainerId : StartupContainerIds)
+	ItemContainerComponent->OnItemAddedEvent.RemoveAll(this);
+	ItemContainerComponent->OnItemRemovedEvent.RemoveAll(this);
+
+	// remove all items
+	for (const UGameItemContainer* Container : ItemContainerComponent->GetAllItemContainers())
 	{
-		if (UGameItemContainer* Container = ItemSubsystem->GetContainerForActor(GetOwner(), ContainerId))
+		if (Container && !Container->IsChild())
 		{
-			AddItemContainer(Container);
+			for (const auto& Elem : Container->GetAllItems())
+			{
+				OnItemRemoved(Elem.Value);
+			}
 		}
 	}
 }
@@ -124,10 +129,16 @@ void UGameItemEquipmentComponent::ActivateItemEquipmentCondition(UGameItem* Item
 		return;
 	}
 
-	Item->OnSlottedEvent.Add(UGameItem::FSlottedDelegate::FDelegate::CreateUObject(this, &UGameItemEquipmentComponent::OnExistingItemSlotted, Item));
-	Item->OnUnslottedEvent.Add(UGameItem::FUnslottedDelegate::FDelegate::CreateUObject(this, &UGameItemEquipmentComponent::OnExistingItemUnslotted, Item));
+	if (!ensure(!ItemConditionStates.Contains(Item)))
+	{
+		// condition is already activated
+		return;
+	}
 
-	FGameItemEquipmentConditionState& ItemCondition = ItemConditionStates.FindOrAdd(Item);
+	Item->OnSlottedEvent.AddUObject(this, &ThisClass::OnExistingItemSlotted);
+	Item->OnUnslottedEvent.AddUObject(this, &ThisClass::OnExistingItemUnslotted);
+
+	FGameItemEquipmentConditionState& ItemCondition = ItemConditionStates.Emplace(Item);
 
 	// setup condition context
 	const UGameItemConditionSchema* DefaultSchema = GetDefault<UGameItemConditionSchema>();
@@ -140,7 +151,8 @@ void UGameItemEquipmentComponent::ActivateItemEquipmentCondition(UGameItem* Item
 	const FWorldConditionContext Context(ItemCondition.State, ContextData);
 	if (!Context.Activate())
 	{
-		UE_LOG(LogGameItems, Error, TEXT("Failed to activate condition for item equipment: %s"), *Item->GetName());
+		UE_LOG(LogGameItems, Error, TEXT("[%s] Failed to activate condition for item equipment: %s"),
+			*GetReadableName(), *Item->GetName());
 		return;
 	}
 
@@ -187,13 +199,7 @@ void UGameItemEquipmentComponent::CheckItemEquipmentCondition(UGameItem* Item, c
 	check(Item);
 	check(EquipFrag);
 
-	FGameItemEquipmentConditionState* ItemCondition = ItemConditionStates.Find(Item);
-
-	if (!ItemCondition)
-	{
-		// no item condition
-		ApplyEquipmentForItem(Item);
-	}
+	FGameItemEquipmentConditionState& ItemCondition = ItemConditionStates.FindChecked(Item);
 
 	// setup condition context
 	const UGameItemConditionSchema* DefaultSchema = GetDefault<UGameItemConditionSchema>();
@@ -201,7 +207,7 @@ void UGameItemEquipmentComponent::CheckItemEquipmentCondition(UGameItem* Item, c
 	SetupConditionContextData(ContextData, Item);
 
 	// check the condition immediately
-	const FWorldConditionContext Context(ItemCondition->State, ContextData);
+	const FWorldConditionContext Context(ItemCondition.State, ContextData);
 	if (Context.IsTrue())
 	{
 		ApplyEquipmentForItem(Item);
@@ -220,34 +226,67 @@ void UGameItemEquipmentComponent::SetupConditionContextData(FWorldConditionConte
 	ContextData.SetContextData(DefaultSchema->GetTargetActorRef(), GetOwner());
 }
 
-UGameEquipment* UGameItemEquipmentComponent::ApplyEquipmentForItem(UGameItem* Item)
+void UGameItemEquipmentComponent::ApplyEquipmentForItem(UGameItem* Item)
 {
-	if (UGameEquipment* ExistingEquipment = ItemEquipmentMap.FindRef(Item))
+	const UGameItemFragment_Equipment* EquipFrag = GetItemEquipmentFragment(Item);
+	if (!EquipFrag->EquipmentDef)
 	{
-		// equipment already applied
-		return ExistingEquipment;
+		return;
 	}
 
-	const UGameItemFragment_Equipment* EquipFrag = GetItemEquipmentFragment(Item);
-	auto NewEquipment = ApplyEquipment(EquipFrag->EquipmentDef, Item);
+	if (ItemEquipmentDefs.Contains(Item))
+	{
+		// item equipment already applied
+		return;
+	}
 
-	ItemEquipmentMap.Add(Item, NewEquipment);
-	return NewEquipment;
+	ItemEquipmentDefs.Add(Item, EquipFrag->EquipmentDef);
+
+	const FGameEquipmentSpec Spec = EquipFrag->CreateEquipmentSpecForItem(Item);
+	ApplyEquipmentSpec(Spec);
 }
 
 void UGameItemEquipmentComponent::RemoveEquipmentForItem(UGameItem* Item)
 {
-	TArray<UGameEquipment*> ItemEquipment = FindAllEquipmentFromItem(Item);
-	for (UGameEquipment* Equipment : ItemEquipment)
-	{
-		RemoveEquipment(Equipment);
-	}
+	// items must have unique equipment defs (there's no other association between item and equipment),
+	// this limitation also exists to allow local-only items but server-spawned equipment.
 
-	ItemEquipmentMap.Remove(Item);
+	if (const TSubclassOf<UGameEquipmentDef>* EquipmentDef = ItemEquipmentDefs.Find(Item))
+	{
+		RemoveEquipmentByDef(*EquipmentDef);
+		ItemEquipmentDefs.Remove(Item);
+	}
+}
+
+UGameEquipment* UGameItemEquipmentComponent::FindAllEquipmentFromItem(UGameItem* Item) const
+{
+	return FindEquipmentByDef(ItemEquipmentDefs.FindRef(Item));
+}
+
+const UGameItemFragment_Equipment* UGameItemEquipmentComponent::GetItemEquipmentFragment_Implementation(UGameItem* Item) const
+{
+	if (const UGameItemFragment_Equipment* EquipFrag = UGameItemStatics::FindFragmentFromItem<UGameItemFragment_Equipment>(Item))
+	{
+		if (EquipFrag->EquipmentDef)
+		{
+			return EquipFrag;
+		}
+	}
+	return nullptr;
+}
+
+bool UGameItemEquipmentComponent::ShouldHandleItemEquipment_Implementation(UGameItem* Item) const
+{
+	return true;
 }
 
 void UGameItemEquipmentComponent::OnItemAdded(UGameItem* Item)
 {
+	if (!ShouldHandleItemEquipment(Item))
+	{
+		return;
+	}
+
 	if (const UGameItemFragment_Equipment* EquipFrag = GetItemEquipmentFragment(Item))
 	{
 		ActivateItemEquipmentCondition(Item, EquipFrag);
@@ -256,13 +295,18 @@ void UGameItemEquipmentComponent::OnItemAdded(UGameItem* Item)
 
 void UGameItemEquipmentComponent::OnItemRemoved(UGameItem* Item)
 {
+	if (!ShouldHandleItemEquipment(Item))
+	{
+		return;
+	}
+
 	if (const UGameItemFragment_Equipment* EquipFrag = GetItemEquipmentFragment(Item))
 	{
 		DeactivateItemEquipmentCondition(Item, EquipFrag);
 	}
 }
 
-void UGameItemEquipmentComponent::OnExistingItemSlotted(const UGameItemContainer* Container, int32 NewSlot, int32 OldSlot, UGameItem* Item)
+void UGameItemEquipmentComponent::OnExistingItemSlotted(UGameItem* Item, const UGameItemContainer* Container, int32 NewSlot, int32 OldSlot)
 {
 	if (Item && ItemConditionStates.Find(Item))
 	{
@@ -273,7 +317,7 @@ void UGameItemEquipmentComponent::OnExistingItemSlotted(const UGameItemContainer
 	}
 }
 
-void UGameItemEquipmentComponent::OnExistingItemUnslotted(const UGameItemContainer* Container, int32 OldSlot, UGameItem* Item)
+void UGameItemEquipmentComponent::OnExistingItemUnslotted(UGameItem* Item, const UGameItemContainer* Container, int32 OldSlot)
 {
 	if (Item && ItemConditionStates.Find(Item))
 	{

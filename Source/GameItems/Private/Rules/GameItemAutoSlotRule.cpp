@@ -6,19 +6,45 @@
 #include "GameItemContainer.h"
 
 
-int32 UGameItemAutoSlotRule::GetAutoSlotPriorityForItem_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
+int32 UGameItemAutoSlotRule::GetAutoSlotPriorityForItem_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const
 {
 	return 0;
 }
 
-bool UGameItemAutoSlotRule::CanAutoSlot_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
+bool UGameItemAutoSlotRule::CanAutoSlot_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const
 {
-	return Container->CanContainItem(Item);
+	return GetContainer()->CanContainItem(Item);
 }
 
-bool UGameItemAutoSlotRule::TryAutoSlot_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags, TArray<UGameItem*>& OutItems) const
+void UGameItemAutoSlotRule::TryAutoSlot(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
 {
-	OutItems.Reset();
+	UGameItemContainer* Container = GetContainer();
+	check(Container);
+
+	bool bExecuteServer;
+	bool bExecuteLocal;
+	Container->GetNetExecutionPlan(bExecuteServer, bExecuteLocal);
+	if (bExecuteServer)
+	{
+		ServerTryAutoSlot(Item, ContextTags);
+	}
+	if (!bExecuteLocal)
+	{
+		return;
+	}
+
+	TryAutoSlotInternal(Item, ContextTags);
+}
+
+void UGameItemAutoSlotRule::ServerTryAutoSlot_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
+{
+	TryAutoSlot(Item, ContextTags);
+}
+
+void UGameItemAutoSlotRule::TryAutoSlotInternal_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
+{
+	UGameItemContainer* Container = GetContainer();
+	check(Container);
 
 	const int32 Slot = GetBestSlotForItem(Item, ContextTags);
 
@@ -33,20 +59,19 @@ bool UGameItemAutoSlotRule::TryAutoSlot_Implementation(UGameItem* Item, const FG
 		else
 		{
 			// don't replace
-			return false;
+			return;
 		}
 	}
 
-	OutItems = Container->AddItem(Item, Slot);
-	return !OutItems.IsEmpty();
+	Container->AddItem(Item, Slot);
 }
 
-int32 UGameItemAutoSlotRule::GetBestSlotForItem_Implementation(UGameItem* Item, const FGameplayTagContainer& ContextTags) const
+int32 UGameItemAutoSlotRule::GetBestSlotForItem_Implementation(const UGameItem* Item, const FGameplayTagContainer& ContextTags) const
 {
 	return INDEX_NONE;
 }
 
-bool UGameItemAutoSlotRule::ShouldReplaceItem_Implementation(UGameItem* NewItem, UGameItem* ExistingItem, const FGameplayTagContainer& ContextTags) const
+bool UGameItemAutoSlotRule::ShouldReplaceItem_Implementation(const UGameItem* NewItem, const UGameItem* ExistingItem, const FGameplayTagContainer& ContextTags) const
 {
 	return false;
 }

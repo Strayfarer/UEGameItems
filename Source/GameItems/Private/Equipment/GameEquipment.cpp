@@ -3,8 +3,10 @@
 
 #include "Equipment/GameEquipment.h"
 
+#include "GameItemsModule.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
+#include "Equipment/GameEquipmentComponent.h"
 #include "Equipment/GameEquipmentDef.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
@@ -20,38 +22,62 @@ void UGameEquipment::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-	DOREPLIFETIME(ThisClass, EquipmentDef);
-	DOREPLIFETIME(ThisClass, Instigator);
-	DOREPLIFETIME(ThisClass, SpawnedActors);
+	FDoRepLifetimeParams Params;
+	Params.bIsPushBased = true;
+
+	DOREPLIFETIME_WITH_PARAMS_FAST(ThisClass, EquipmentSpec, Params);
+	DOREPLIFETIME_WITH_PARAMS_FAST(ThisClass, SpawnedActors, Params);
+}
+
+void UGameEquipment::OnRep_SpawnedActors()
+{
 }
 
 UWorld* UGameEquipment::GetWorld() const
 {
-	if (const AActor* Owner = GetOwner())
+	if (const AActor* Owner = GetOwningActor())
 	{
 		return Owner->GetWorld();
 	}
 	return nullptr;
 }
 
-void UGameEquipment::SetEquipmentDef(TSubclassOf<UGameEquipmentDef> InEquipmentDef)
+FString UGameEquipment::GetReadableName() const
 {
-	EquipmentDef = InEquipmentDef;
+	return FString::Printf(TEXT("%s(%s)"), *GetNameSafe(EquipmentSpec.EquipmentDef), *GetName());
+}
+
+void UGameEquipment::SetEquipmentSpec(const FGameEquipmentSpec& InSpec)
+{
+	EquipmentSpec = InSpec;
+	MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, EquipmentSpec, this);
 }
 
 const UGameEquipmentDef* UGameEquipment::GetEquipmentDefCDO() const
 {
-	return GetDefault<UGameEquipmentDef>(EquipmentDef);
+	return GetDefault<UGameEquipmentDef>(EquipmentSpec.EquipmentDef);
 }
 
-AActor* UGameEquipment::GetOwner() const
+UGameEquipmentComponent* UGameEquipment::GetOwner() const
 {
-	return Cast<AActor>(GetOuter());
+	return GetTypedOuter<UGameEquipmentComponent>();
+}
+
+AActor* UGameEquipment::GetOwningActor() const
+{
+	return GetTypedOuter<AActor>();
+}
+
+TArray<AActor*> UGameEquipment::GetSpawnedActors() const
+{
+	TArray<AActor*> Result(SpawnedActors);
+	Result.Append(LocalSpawnedActors);
+	return Result;
 }
 
 AActor* UGameEquipment::GetSpawnedActorOfClass(TSubclassOf<AActor> ActorClass) const
 {
-	for (AActor* Actor : SpawnedActors)
+	for (AActor* Actor : GetSpawnedActors())
 	{
 		if (Actor->IsA(ActorClass))
 		{
@@ -59,6 +85,32 @@ AActor* UGameEquipment::GetSpawnedActorOfClass(TSubclassOf<AActor> ActorClass) c
 		}
 	}
 	return nullptr;
+}
+
+void UGameEquipment::Equip()
+{
+	if (!bIsEquipped)
+	{
+		bIsEquipped = true;
+
+		UE_LOG(LogGameItems, Verbose, TEXT("%s[%s] Equip"), *GetOwner()->GetDebugPrefix(), *GetReadableName());
+
+		OnEquipped();
+		OnEquipped_BP();
+	}
+}
+
+void UGameEquipment::Unequip()
+{
+	if (bIsEquipped)
+	{
+		bIsEquipped = false;
+
+		UE_LOG(LogGameItems, Verbose, TEXT("%s[%s] Unequip"), *GetOwner()->GetDebugPrefix(), *GetReadableName());
+
+		OnUnequipped();
+		OnUnequipped_BP();
+	}
 }
 
 void UGameEquipment::SpawnEquipmentActors()
@@ -69,10 +121,25 @@ void UGameEquipment::SpawnEquipmentActors()
 		return;
 	}
 
+	auto IsLocallyControlled = [](const AActor* Actor)
+		{
+			if (Actor->GetNetMode() == NM_Client && Actor->GetLocalRole() == ROLE_AutonomousProxy)
+			{
+				// networked client in control
+				return true;
+			}
+			if (Actor->HasAuthority() && Actor->GetRemoteRole() != ROLE_AutonomousProxy)
+			{
+				// local authority in control
+				return true;
+			}
+			return false;
+		};
+
+	AActor* OwningActor = GetOwningActor();
+
 	USceneComponent* AttachTarget = GetTargetAttachComponent();
 	check(AttachTarget);
-
-	AActor* OwningActor = AttachTarget->GetOwner();
 
 	for (const FGameEquipmentActorSpawnInfo& SpawnInfo : EquipmentCDO->ActorsToSpawn)
 	{
@@ -81,45 +148,110 @@ void UGameEquipment::SpawnEquipmentActors()
 			continue;
 		}
 
-		AActor* NewActor = GetWorld()->SpawnActorDeferred<AActor>(SpawnInfo.ActorClass, FTransform::Identity, OwningActor);
-		NewActor->FinishSpawning(FTransform::Identity, true);
-		NewActor->SetActorRelativeTransform(SpawnInfo.AttachTransform);
-		NewActor->AttachToComponent(AttachTarget, FAttachmentTransformRules::KeepRelativeTransform, SpawnInfo.AttachSocket);
+		bool bIsReplicatedSpawn = false;
+		if (OwningActor->GetNetMode() != NM_Standalone)
+		{
+			if (SpawnInfo.NetSpawnPolicy == EGameEquipmentActorSpawnPolicy::ServerInitiated)
+			{
+				bIsReplicatedSpawn = true;
+				if (!OwningActor->HasAuthority())
+				{
+					// spawn on server only
+					continue;
+				}
+			}
+			else if (SpawnInfo.NetSpawnPolicy == EGameEquipmentActorSpawnPolicy::LocalOnly)
+			{
+				if (!IsLocallyControlled(OwningActor))
+				{
+					continue;
+				}
+			}
+		}
 
-		SpawnedActors.Add(NewActor);
+		UE_LOG(LogGameItems, Verbose, TEXT("%s[%s] Spawning equipment actor: %s (NetSpawnPolicy: %s)"),
+			*GetOwner()->GetDebugPrefix(), *GetReadableName(),
+			*SpawnInfo.ActorClass->GetName(),
+			*UEnum::GetDisplayValueAsText(SpawnInfo.NetSpawnPolicy).ToString());
+
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.Owner = OwningActor;
+		AActor* NewActor = GetWorld()->SpawnActor<AActor>(SpawnInfo.ActorClass, SpawnInfo.AttachTransform, SpawnParams);
+		AttachEquipmentActor(NewActor, AttachTarget, SpawnInfo);
+
+		if (bIsReplicatedSpawn)
+		{
+			// required for the actor to be spawned on clients
+			NewActor->SetReplicates(true);
+
+			SpawnedActors.Add(NewActor);
+			MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, SpawnedActors, this);
+		}
+		else
+		{
+			LocalSpawnedActors.Add(NewActor);
+		}
 	}
+}
+
+void UGameEquipment::AttachEquipmentActor(AActor* NewActor, USceneComponent* AttachTarget, const FGameEquipmentActorSpawnInfo& SpawnInfo)
+{
+	FName AttachSocket = SpawnInfo.AttachSocket;
+
+	// look for context-specific attach socket if any
+	for (const FGameplayTag& Tag : EquipmentSpec.ContextTags)
+	{
+		if (SpawnInfo.ContextualAttachSockets.Contains(Tag))
+		{
+			AttachSocket = SpawnInfo.ContextualAttachSockets.FindChecked(Tag);
+			break;
+		}
+	}
+
+	NewActor->AttachToComponent(AttachTarget, FAttachmentTransformRules::KeepRelativeTransform, AttachSocket);
+	NewActor->SetActorRelativeTransform(SpawnInfo.AttachTransform);
 }
 
 void UGameEquipment::DestroyEquipmentActors()
 {
-	for (AActor* Actor : SpawnedActors)
+	const AActor* OwningActor = GetOwningActor();
+	if (OwningActor->HasAuthority())
+	{
+		for (AActor* Actor : SpawnedActors)
+		{
+			if (Actor)
+			{
+				Actor->Destroy();
+			}
+		}
+		SpawnedActors.Empty();
+		MARK_PROPERTY_DIRTY_FROM_NAME(ThisClass, SpawnedActors, this);
+	}
+
+	for (AActor* Actor : LocalSpawnedActors)
 	{
 		if (Actor)
 		{
 			Actor->Destroy();
 		}
 	}
-
-	SpawnedActors.Empty();
+	LocalSpawnedActors.Empty();
 }
 
 void UGameEquipment::OnEquipped()
 {
 	SpawnEquipmentActors();
-
-	OnEquipped_BP();
 }
 
 void UGameEquipment::OnUnequipped()
 {
 	DestroyEquipmentActors();
-
-	OnUnequipped_BP();
 }
 
 USceneComponent* UGameEquipment::GetTargetAttachComponent() const
 {
-	AActor* OwningActor = GetOwner();
+	AActor* OwningActor = GetOwningActor();
 	if (!OwningActor)
 	{
 		return nullptr;
@@ -129,9 +261,11 @@ USceneComponent* UGameEquipment::GetTargetAttachComponent() const
 	{
 		return Char->GetMesh();
 	}
-	return OwningActor->GetRootComponent();
-}
 
-void UGameEquipment::OnRep_Instigator()
-{
+	if (USkeletalMeshComponent* FoundSkeletalMesh = OwningActor->FindComponentByClass<USkeletalMeshComponent>())
+	{
+		return FoundSkeletalMesh;
+	}
+
+	return OwningActor->GetRootComponent();
 }

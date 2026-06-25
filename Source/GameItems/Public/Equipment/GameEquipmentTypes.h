@@ -3,13 +3,76 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameItemTypes.h"
 #include "Net/Serialization/FastArraySerializer.h"
 #include "Templates/SubclassOf.h"
 #include "GameEquipmentTypes.generated.h"
 
-class UGameEquipmentComponent;
 class UGameEquipment;
+class UGameEquipmentComponent;
+class UGameEquipmentDef;
 struct FGameEquipmentList;
+
+
+/**
+ * Defines an equipment definition and dynamic stats used
+ * to create and apply new equipment.
+ */
+USTRUCT(BlueprintType)
+struct FGameEquipmentSpec
+{
+	GENERATED_BODY()
+
+	FGameEquipmentSpec()
+	{
+	}
+
+	FGameEquipmentSpec(const TSubclassOf<UGameEquipmentDef>& InEquipmentDef, const TArray<FGameItemTagStack>& InTagStats);
+	FGameEquipmentSpec(const TSubclassOf<UGameEquipmentDef>& InEquipmentDef, const TArray<FGameItemTagStack>& InTagStats, const FGameplayTagContainer& InContextTags);
+
+	const TMap<FGameplayTag, int32>& GetTagStatsMap() const { return TagStatsMap; }
+
+	void PostSerialize(const FArchive& Ar);
+
+	/** The equipment definition, defining the equipment class and other info. */
+	UPROPERTY()
+	TSubclassOf<UGameEquipmentDef> EquipmentDef;
+
+	/** Additional tags to contain contextual information. Commonly includes which slot an item is equipped to or other traits. */
+	UPROPERTY()
+	FGameplayTagContainer ContextTags;
+
+protected:
+	/** Unique stats for this equipment such as level, rarity, etc, usually pulled from granting game items. */
+	UPROPERTY()
+	TArray<FGameItemTagStack> TagStats;
+
+	/** Cached map of stats by tag, for faster lookup. */
+	TMap<FGameplayTag, int32> TagStatsMap;
+};
+
+template <>
+struct TStructOpsTypeTraits<FGameEquipmentSpec> : public TStructOpsTypeTraitsBase2<FGameEquipmentSpec>
+{
+	enum
+	{
+		WithPostSerialize = true,
+	};
+};
+
+
+/**
+ * Determines how equipment actors should be spawned.
+ */
+UENUM(BlueprintType)
+enum class EGameEquipmentActorSpawnPolicy : uint8
+{
+	/** Spawn the equipment on the local owner only. */
+	LocalOnly,
+
+	/** Spawn the equipment on the server, and replicate to clients. */
+	ServerInitiated,
+};
 
 
 /**
@@ -32,9 +95,17 @@ struct FGameEquipmentActorSpawnInfo
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FName AttachSocket;
 
+	/** Optional map of context tag to attach socket names. If there's no matching context, AttachSocket will be used. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TMap<FGameplayTag, FName> ContextualAttachSockets;
+
 	/** The relative transform to set for the actor when attached. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FTransform AttachTransform;
+
+	/** How the equipment actor should be spawned in networked games. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	EGameEquipmentActorSpawnPolicy NetSpawnPolicy = EGameEquipmentActorSpawnPolicy::ServerInitiated;
 };
 
 
@@ -50,16 +121,17 @@ struct FGameEquipmentListEntry : public FFastArraySerializerItem
 	{
 	}
 
-	FString ToDebugString() const;
+	FGameEquipmentListEntry(UGameEquipment* InEquipment)
+		: Equipment(InEquipment)
+	{
+	}
 
-	TObjectPtr<UGameEquipment> GetEquipment() const { return Equipment; }
+	// FFastArraySerializerItem
+	FString GetDebugString() const;
 
-private:
 	/** The equipment instance. */
 	UPROPERTY()
 	TObjectPtr<UGameEquipment> Equipment = nullptr;
-
-	friend FGameEquipmentList;
 };
 
 
@@ -76,8 +148,9 @@ struct FGameEquipmentList : public FFastArraySerializer
 	}
 
 	// FFastArraySerializer
-	void PreReplicatedRemove(const TArrayView<int32> RemovedIndices, int32 FinalSize);
-	void PostReplicatedAdd(const TArrayView<int32> AddedIndices, int32 FinalSize);
+	void PreReplicatedRemove(const TArrayView<int32>& RemovedIndices, int32 FinalSize);
+	void PostReplicatedAdd(const TArrayView<int32>& AddedIndices, int32 FinalSize);
+	void PostReplicatedChange(const TArrayView<int32>& ChangedIndices, int32 FinalSize);
 
 	bool NetDeltaSerialize(FNetDeltaSerializeInfo& DeltaParms)
 	{
@@ -87,12 +160,19 @@ struct FGameEquipmentList : public FFastArraySerializer
 	void AddEntry(UGameEquipment* Equipment);
 	void RemoveEntry(UGameEquipment* Equipment);
 
-private:
+	const TArray<FGameEquipmentListEntry>& GetEntries() const { return Entries; }
+
+protected:
 	/** Replicated list of equipment entries */
 	UPROPERTY()
 	TArray<FGameEquipmentListEntry> Entries;
 
-	friend UGameEquipmentComponent;
+public:
+	DECLARE_MULTICAST_DELEGATE_OneParam(FGameEquipmentListReplicateDelegate, FGameEquipmentListEntry& /*Entry*/);
+
+	FGameEquipmentListReplicateDelegate OnPreReplicatedRemoveEvent;
+	FGameEquipmentListReplicateDelegate OnPostReplicatedAddEvent;
+	FGameEquipmentListReplicateDelegate OnPostReplicatedChangeEvent;
 };
 
 template <>
