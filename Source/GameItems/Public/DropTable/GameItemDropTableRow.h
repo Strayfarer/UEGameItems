@@ -4,7 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "GameItemDropContent.h"
+#if ENGINE_MAJOR_VERSION < 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 8)
 #include "InstancedStruct.h"
+#endif
 #include "Engine/DataTable.h"
 #include "GameItemDropTableRow.generated.h"
 
